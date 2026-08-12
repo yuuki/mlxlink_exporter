@@ -24,9 +24,6 @@ const (
 	// ReasonOutputTooLarge indicates the output exceeded the stdout limit and the
 	// process was killed.
 	ReasonOutputTooLarge ErrorReason = "output_too_large"
-	// ReasonOverlapping indicates a sweep was still running when the next tick
-	// fired, so the tick was dropped.
-	ReasonOverlapping ErrorReason = "overlapping"
 	// ReasonUnknown is the fallback for unclassified failures.
 	ReasonUnknown ErrorReason = "unknown"
 )

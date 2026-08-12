@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"slices"
-	"strings"
+	"maps"
 	"sync/atomic"
 	"time"
 
@@ -37,8 +36,8 @@ func (r *realTicker) C() <-chan time.Time { return r.t.C }
 func (r *realTicker) Stop() { r.t.Stop() }
 
 // discoverer and commandRunner are the consumer side views of *SysfsDiscovery
-// and *ExecRunner, kept unexported so the package's public surface stays the
-// concrete implementations.
+// and *ExecRunner: the poller needs nothing beyond these calls, and tests
+// substitute fakes for them.
 type discoverer interface {
 	Discover(ctx context.Context) ([]Target, error)
 }
@@ -71,59 +70,22 @@ type PCIeEyeSnapshot struct {
 	LastDuration time.Duration
 }
 
-type pcieEyeSnapshotSet struct {
-	devices []PCIeEyeSnapshot
-}
-
-func newPCIeEyeSnapshotSet(devices []PCIeEyeSnapshot) *pcieEyeSnapshotSet {
-	sorted := make([]PCIeEyeSnapshot, len(devices))
-	copy(sorted, devices)
-	slices.SortFunc(sorted, func(a, b PCIeEyeSnapshot) int {
-		return strings.Compare(a.Target.Device, b.Target.Device)
-	})
-	return &pcieEyeSnapshotSet{devices: sorted}
-}
-
-func (s *pcieEyeSnapshotSet) lookup(device string) (PCIeEyeSnapshot, bool) {
-	if s == nil {
-		return PCIeEyeSnapshot{}, false
-	}
-	for _, snapshot := range s.devices {
-		if snapshot.Target.Device == device {
-			return snapshot, true
-		}
-	}
-	return PCIeEyeSnapshot{}, false
-}
-
-// snapshotSet is an immutable set of device snapshots, sorted by device name so
-// that exported metrics keep a stable order. It is replaced wholesale, never
-// mutated in place.
-type snapshotSet struct {
-	devices []DeviceSnapshot
-}
-
-func newSnapshotSet(devices []DeviceSnapshot) *snapshotSet {
-	sorted := make([]DeviceSnapshot, len(devices))
-	copy(sorted, devices)
-	slices.SortFunc(sorted, func(a, b DeviceSnapshot) int {
-		return strings.Compare(a.Target.Device, b.Target.Device)
-	})
-	return &snapshotSet{devices: sorted}
+// snapshotSet is an immutable set of snapshots keyed by device name. It is
+// built once per publish and replaced wholesale, never mutated after being
+// stored, so scrapes read it without a lock.
+type snapshotSet[T any] struct {
+	byDevice map[string]T
 }
 
 // lookup finds a device by name; a nil set simply has no devices, which is the
-// state before the first sweep completes.
-func (s *snapshotSet) lookup(device string) (DeviceSnapshot, bool) {
+// state before the first sweep publishes.
+func (s *snapshotSet[T]) lookup(device string) (T, bool) {
 	if s == nil {
-		return DeviceSnapshot{}, false
+		var zero T
+		return zero, false
 	}
-	for _, snapshot := range s.devices {
-		if snapshot.Target.Device == device {
-			return snapshot, true
-		}
-	}
-	return DeviceSnapshot{}, false
+	snapshot, ok := s.byDevice[device]
+	return snapshot, ok
 }
 
 // Poller collects mlxlink data in the background so that scrapes never execute
@@ -138,10 +100,11 @@ type Poller struct {
 	clk         clock
 	logger      *slog.Logger
 
-	store         atomic.Pointer[snapshotSet]
-	pcieEyeStore  atomic.Pointer[pcieEyeSnapshotSet]
+	store         atomic.Pointer[snapshotSet[DeviceSnapshot]]
+	pcieEyeStore  atomic.Pointer[snapshotSet[PCIeEyeSnapshot]]
 	errors        *prometheus.CounterVec
 	pcieEyeErrors *prometheus.CounterVec
+	overlaps      prometheus.Counter
 	ready         atomic.Bool
 }
 
@@ -165,11 +128,7 @@ func WithShowPCIeEye(enabled bool) PollerOption {
 
 // NewPoller returns a poller that collects from discovery through runner every
 // interval. A nil logger falls back to slog.Default.
-func NewPoller(discovery *SysfsDiscovery, runner *ExecRunner, interval time.Duration, logger *slog.Logger, opts ...PollerOption) *Poller {
-	return newPoller(discovery, runner, interval, logger, opts...)
-}
-
-func newPoller(discovery discoverer, runner commandRunner, interval time.Duration, logger *slog.Logger, opts ...PollerOption) *Poller {
+func NewPoller(discovery discoverer, runner commandRunner, interval time.Duration, logger *slog.Logger, opts ...PollerOption) *Poller {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -182,12 +141,16 @@ func newPoller(discovery discoverer, runner commandRunner, interval time.Duratio
 		logger:    logger,
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mlxlink_collection_errors_total",
-			Help: "Total number of mlxlink query and decode errors, plus skipped overlapping sweeps, by reason.",
+			Help: "Total number of mlxlink query and decode errors by reason.",
 		}, []string{"device", "port", "pci_addr", "reason"}),
 		pcieEyeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mlxlink_pcie_eye_collection_errors_total",
-			Help: "Total number of PCIe Eye query and decode errors, plus skipped overlapping sweeps, by reason.",
+			Help: "Total number of PCIe Eye query and decode errors by reason.",
 		}, []string{"device", "pci_addr", "reason"}),
+		overlaps: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "mlxlink_sweep_overlaps_total",
+			Help: "Total number of ticks dropped because the previous sweep was still running. A growing value means the poll interval is shorter than a full sweep.",
+		}),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -201,12 +164,15 @@ func (p *Poller) Errors() prometheus.Collector { return p.errors }
 // PCIeEyeErrors exposes the independent PCIe Eye collection error counter.
 func (p *Poller) PCIeEyeErrors() prometheus.Collector { return p.pcieEyeErrors }
 
+// Overlaps exposes the sweep overlap counter for registration by the caller.
+func (p *Poller) Overlaps() prometheus.Collector { return p.overlaps }
+
 // Snapshots returns the current immutable snapshot set, or nil before the first
 // device has been collected.
-func (p *Poller) Snapshots() *snapshotSet { return p.store.Load() }
+func (p *Poller) Snapshots() *snapshotSet[DeviceSnapshot] { return p.store.Load() }
 
 // PCIeEyeSnapshots returns the independent root PCIe Eye snapshots.
-func (p *Poller) PCIeEyeSnapshots() *pcieEyeSnapshotSet { return p.pcieEyeStore.Load() }
+func (p *Poller) PCIeEyeSnapshots() *snapshotSet[PCIeEyeSnapshot] { return p.pcieEyeStore.Load() }
 
 // Ready reports whether at least one device has ever been collected
 // successfully. It never returns to false: once data exists, a later failure
@@ -239,7 +205,9 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 // drainTicks discards the single tick that may have fired while a sweep was
-// running and counts it: it is the sweep that could not start.
+// running and counts it: it is the sweep that could not start. Dropping it
+// rather than sweeping again immediately is the point, so a slow sweep does not
+// chain into back-to-back mlxlink invocations against the firmware.
 //
 // Exactly one tick is taken per sweep. A real ticker coalesces the ticks it
 // missed, so no more than one can ever be pending however long a sweep runs,
@@ -248,7 +216,7 @@ func (p *Poller) Run(ctx context.Context) {
 // since Go 1.23 a ticker channel reports len 0 while a tick is pending.
 //
 // A tick that arrives just as the drain runs can be consumed here instead of
-// starting a sweep, which slips that sweep by one interval and attributes one
+// starting a sweep, which slips that sweep by one interval and counts one
 // overlap that did not happen. Together with coalescing, overlaps are
 // undercounted; the signal is meant for spotting a poll interval that is too
 // short, not exact accounting.
@@ -258,30 +226,12 @@ func (p *Poller) drainTicks(ctx context.Context, t ticker) {
 		if ctx.Err() != nil {
 			return
 		}
-		p.countOverlap()
+		p.overlaps.Inc()
+		// Logged after counting so the record marks a completed accounting.
+		p.logger.Warn("mlxlink sweep did not finish before the next tick",
+			"poll_interval", p.interval.String())
 	default:
 	}
-}
-
-func (p *Poller) countOverlap() {
-	set := p.store.Load()
-	if set == nil {
-		return
-	}
-
-	for _, snapshot := range set.devices {
-		p.countError(snapshot.Target, ReasonOverlapping)
-	}
-	if p.showPCIeEye {
-		if pcieSet := p.pcieEyeStore.Load(); pcieSet != nil {
-			for _, snapshot := range pcieSet.devices {
-				p.countPCIeEyeError(snapshot.Target, ReasonOverlapping)
-			}
-		}
-	}
-	// Logged after counting so the record marks a completed accounting.
-	p.logger.Warn("mlxlink sweep did not finish before the next tick",
-		"devices", len(set.devices), "poll_interval", p.interval.String())
 }
 
 // sweep collects every discovered device once, in order. Discovery is repeated
@@ -298,63 +248,76 @@ func (p *Poller) sweep(ctx context.Context) {
 		return
 	}
 
-	previous := p.store.Load()
-	collected := make([]DeviceSnapshot, 0, len(targets))
-
-	for i, target := range targets {
-		snapshot, ok := p.collect(ctx, target, previous)
-		if !ok {
-			// Shutting down: leave the published set as it is.
-			return
-		}
-		collected = append(collected, snapshot)
-		p.publish(collected, targets[i+1:], previous)
-
+	completed := sweepDevices(ctx, &p.store, targets, p.collect, func(snapshot DeviceSnapshot) {
 		// Readiness is announced only once the data behind it is published:
 		// a reader that sees Ready() must be able to scrape that device.
 		if snapshot.LastError == "" {
 			p.ready.Store(true)
 		}
+	})
+	if !completed {
+		// Shutting down: leave the published sets as they are.
+		return
 	}
 
-	// Devices that disappeared are absent from targets and therefore from the
-	// set published here.
-	p.store.Store(newSnapshotSet(collected))
 	if p.showPCIeEye {
-		p.sweepPCIeEye(ctx, targets)
+		sweepDevices(ctx, &p.pcieEyeStore, targets, p.collectPCIeEye, nil)
 	}
 }
 
-func (p *Poller) sweepPCIeEye(ctx context.Context, targets []Target) {
-	previous := p.pcieEyeStore.Load()
-	collected := make([]PCIeEyeSnapshot, 0, len(targets))
-
-	for i, target := range targets {
-		snapshot, ok := p.collectPCIeEye(ctx, target, previous)
-		if !ok {
-			return
-		}
-		collected = append(collected, snapshot)
-		p.publishPCIeEye(collected, targets[i+1:], previous)
+// sweepDevices collects targets in order and publishes after each one, so a
+// scrape landing mid-sweep sees this sweep's data for the devices already
+// visited and the previous data for the ones still pending, never a gap. The
+// working map is seeded from the previous set restricted to the targets
+// discovered now, which is what makes a device that disappeared fall out at the
+// first publish of the sweep. onPublish, when set, runs once the device is
+// visible to scrapes.
+//
+// It reports whether the sweep ran to completion: a false from collect means
+// shutting down, where the published set must be left as it is.
+func sweepDevices[T any](
+	ctx context.Context,
+	store *atomic.Pointer[snapshotSet[T]],
+	targets []Target,
+	collect func(context.Context, Target, *snapshotSet[T]) (T, bool),
+	onPublish func(T),
+) bool {
+	if len(targets) == 0 {
+		// The loop below has no device left to publish with, and what was
+		// published before belongs to devices that are all gone.
+		store.Store(&snapshotSet[T]{})
+		return true
 	}
-	p.pcieEyeStore.Store(newPCIeEyeSnapshotSet(collected))
-}
 
-func (p *Poller) publishPCIeEye(collected []PCIeEyeSnapshot, pending []Target, previous *pcieEyeSnapshotSet) {
-	devices := make([]PCIeEyeSnapshot, 0, len(collected)+len(pending))
-	devices = append(devices, collected...)
-	for _, target := range pending {
+	previous := store.Load()
+	working := make(map[string]T, len(targets))
+	for _, target := range targets {
 		if snapshot, ok := previous.lookup(target.Device); ok {
-			devices = append(devices, snapshot)
+			working[target.Device] = snapshot
 		}
 	}
-	p.pcieEyeStore.Store(newPCIeEyeSnapshotSet(devices))
+
+	for _, target := range targets {
+		snapshot, ok := collect(ctx, target, previous)
+		if !ok {
+			return false
+		}
+		working[target.Device] = snapshot
+		// The published map is a copy: the working map keeps being written to
+		// for the rest of the sweep, and a stored set is immutable.
+		store.Store(&snapshotSet[T]{byDevice: maps.Clone(working)})
+
+		if onPublish != nil {
+			onPublish(snapshot)
+		}
+	}
+	return true
 }
 
 func (p *Poller) collectPCIeEye(
 	ctx context.Context,
 	target Target,
-	previous *pcieEyeSnapshotSet,
+	previous *snapshotSet[PCIeEyeSnapshot],
 ) (PCIeEyeSnapshot, bool) {
 	snapshot, _ := previous.lookup(target.Device)
 	snapshot.Target = target
@@ -387,24 +350,10 @@ func (p *Poller) collectPCIeEye(
 	return snapshot, true
 }
 
-// publish makes the devices collected so far visible mid-sweep. Devices this
-// sweep has not reached yet keep their previous values so a scrape never sees a
-// gap while the sweep walks the remaining devices.
-func (p *Poller) publish(collected []DeviceSnapshot, pending []Target, previous *snapshotSet) {
-	devices := make([]DeviceSnapshot, 0, len(collected)+len(pending))
-	devices = append(devices, collected...)
-	for _, target := range pending {
-		if snapshot, ok := previous.lookup(target.Device); ok {
-			devices = append(devices, snapshot)
-		}
-	}
-	p.store.Store(newSnapshotSet(devices))
-}
-
 // collect runs mlxlink for one target and folds the result into the previous
 // snapshot. The boolean is false only while shutting down, where the failure is
 // expected and must not be recorded as a collection error.
-func (p *Poller) collect(ctx context.Context, target Target, previous *snapshotSet) (DeviceSnapshot, bool) {
+func (p *Poller) collect(ctx context.Context, target Target, previous *snapshotSet[DeviceSnapshot]) (DeviceSnapshot, bool) {
 	snapshot, _ := previous.lookup(target.Device)
 	// Discovery may have refreshed the labels of an existing device.
 	snapshot.Target = target
@@ -577,20 +526,22 @@ func (p *Poller) recordFailure(snapshot *DeviceSnapshot, reason ErrorReason, err
 	snapshot.LastError = reason
 	p.countError(snapshot.Target, reason)
 
-	// Only the underlying cause is logged here. A *RunError renders its
-	// captured stderr, which would put up to 4 KiB of tool output into the
-	// warning of every failed sweep; the runner already records it at debug
-	// level, where the volume is asked for.
-	logErr := err
-	var runErr *RunError
-	if errors.As(err, &runErr) {
-		logErr = runErr.Err
-	}
-
 	p.logger.Warn("mlxlink collection failed",
 		"device", snapshot.Target.Device, "port", snapshot.Target.Port,
 		"pci_addr", snapshot.Target.PCIAddr, "reason", reason.String(),
-		"duration", snapshot.LastDuration, "err", logErr)
+		"duration", snapshot.LastDuration, "err", logCause(err))
+}
+
+// logCause strips a *RunError down to the error underneath it. A *RunError
+// renders its captured stderr, which would put up to 4 KiB of tool output into
+// the warning of every failed sweep; the runner already records it at debug
+// level, where the volume is asked for.
+func logCause(err error) error {
+	var runErr *RunError
+	if errors.As(err, &runErr) {
+		return runErr.Err
+	}
+	return err
 }
 
 func (p *Poller) countError(target Target, reason ErrorReason) {
@@ -601,14 +552,9 @@ func (p *Poller) recordPCIeEyeFailure(snapshot *PCIeEyeSnapshot, reason ErrorRea
 	snapshot.LastError = reason
 	p.countPCIeEyeError(snapshot.Target, reason)
 
-	logErr := err
-	var runErr *RunError
-	if errors.As(err, &runErr) {
-		logErr = runErr.Err
-	}
 	p.logger.Warn("mlxlink PCIe Eye collection failed",
 		"device", snapshot.Target.Device, "pci_addr", snapshot.Target.PCIAddr,
-		"reason", reason.String(), "duration", snapshot.LastDuration, "err", logErr)
+		"reason", reason.String(), "duration", snapshot.LastDuration, "err", logCause(err))
 }
 
 func (p *Poller) countPCIeEyeError(target Target, reason ErrorReason) {

@@ -89,6 +89,7 @@ func main() {
 		prometheus.NewGoCollector(),
 		mlxlinkCollector,
 		poller.Errors(),
+		poller.Overlaps(),
 	}
 	if cfg.ShowPCIeEye {
 		collectors = append(collectors,

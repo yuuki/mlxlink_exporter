@@ -22,14 +22,19 @@ func TestParseFloatSafe_ParsesScalars(t *testing.T) {
 		{"negative", "-3.5", Value{Float: -3.5, Valid: true}},
 		{"exponent", "1e10", Value{Float: 1e10, Valid: true}},
 		{"surrounding spaces", "  42  ", Value{Float: 42, Valid: true}},
-		{"voltage unit", "3.3V", Value{Float: 3.3, Valid: true}},
-		{"temperature unit", "45C", Value{Float: 45, Valid: true}},
-		{"spaced unit", "1.5 mW", Value{Float: 1.5, Valid: true}},
-		{"negative with spaced unit", "-40 C", Value{Float: -40, Valid: true}},
-		{"exponent with unit", "1.5e-3 mA", Value{Float: 1.5e-3, Valid: true}},
-		// Trailing junk made of float characters is shrunk away rather than
-		// rejected; the leading number is still the best available reading.
-		{"dotted version", "1.2.3", Value{Float: 1.2, Valid: true}},
+		// The bracketed range mlxlink appends to a measured value is the one
+		// suffix that is read past.
+		{"range suffix", "61 [-10..80]", Value{Float: 61, Valid: true}},
+		{"negative with range suffix", "-5 [-10..80]", Value{Float: -5, Valid: true}},
+		// Any other trailing text leaves a scalar unreadable rather than
+		// half-read: none of these forms has been seen in a real capture, and
+		// guessing at one would mean exporting a number mlxlink did not report.
+		{"voltage unit", "3.3V", Value{}},
+		{"temperature unit", "45C", Value{}},
+		{"spaced unit", "1.5 mW", Value{}},
+		{"negative with spaced unit", "-40 C", Value{}},
+		{"exponent with unit", "1.5e-3 mA", Value{}},
+		{"dotted version", "1.2.3", Value{}},
 		{"overflow", "1e309", Value{}},
 		{"negative overflow", "-1e309", Value{}},
 		{"overflow with unit", "1e309V", Value{}},
@@ -531,8 +536,8 @@ func TestDecode_StatusErrorOutranksPayloadShape(t *testing.T) {
 func TestFieldAliases_CoverEveryCanonicalName(t *testing.T) {
 	t.Parallel()
 
-	// Every canonical name the decoder asks for must have at least one spelling
-	// in the table; a typo here would silently blank a field.
+	// Every canonical name the decoder asks for must have its spelling in the
+	// table; a typo here would silently blank a field.
 	canonical := []string{
 		sectionModule, sectionOperational, sectionCounters, sectionFECHistogram, sectionSerDesTX,
 		sectionEye, sectionPCIeEye,
@@ -547,12 +552,12 @@ func TestFieldAliases_CoverEveryCanonicalName(t *testing.T) {
 	}
 
 	for _, name := range canonical {
-		if len(fieldAliases[name]) == 0 {
-			t.Errorf("canonical name %q has no alias", name)
+		if fieldAliases[name] == "" {
+			t.Errorf("canonical name %q has no mlxlink key", name)
 		}
 	}
 	if len(fieldAliases) != len(canonical) {
-		t.Errorf("expected %d entries in the alias table, got %d", len(canonical), len(fieldAliases))
+		t.Errorf("expected %d entries in the key table, got %d", len(canonical), len(fieldAliases))
 	}
 }
 

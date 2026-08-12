@@ -61,7 +61,7 @@ func TestCollector_ExportsNetworkEye(t *testing.T) {
 		MidGrade:   []LaneValue{{Lane: 0, Value: 124}, {Lane: 3, Value: 114}},
 		LowerGrade: []LaneValue{{Lane: 0, Value: 106}, {Lane: 3, Value: 95}},
 	}}
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         data,
 		LastSuccess:  collectorSuccess,
@@ -111,7 +111,7 @@ func TestCollector_ExportsFECHistogramAndSerDesTX(t *testing.T) {
 			},
 		},
 	}
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         data,
 		LastSuccess:  collectorSuccess,
@@ -143,14 +143,14 @@ mlxlink_serdes_tx_fir_coefficient{device="mlx5_0",lane="3",pci_addr="0000:1a:00.
 	}
 }
 
-type fakeSnapshotSource struct{ set *snapshotSet }
+type fakeSnapshotSource struct{ set *snapshotSet[DeviceSnapshot] }
 
-func (f fakeSnapshotSource) Snapshots() *snapshotSet { return f.set }
+func (f fakeSnapshotSource) Snapshots() *snapshotSet[DeviceSnapshot] { return f.set }
 
-func newTestCollector(t *testing.T, set *snapshotSet, now time.Time) *Collector {
+func newTestCollector(t *testing.T, set *snapshotSet[DeviceSnapshot], now time.Time) *Collector {
 	t.Helper()
 
-	return newCollector(fakeSnapshotSource{set: set}, collectorStaleAfter, newDiscardLogger(),
+	return NewCollector(fakeSnapshotSource{set: set}, collectorStaleAfter, newDiscardLogger(),
 		WithNow(func() time.Time { return now }))
 }
 
@@ -253,7 +253,7 @@ func fullPortData(lanes int) PortData {
 func TestCollector_ExportsAllFamilies(t *testing.T) {
 	t.Parallel()
 
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         fullPortData(3),
 		LastSuccess:  collectorSuccess,
@@ -269,7 +269,7 @@ func TestCollector_ExportsAllFamilies(t *testing.T) {
 func TestCollector_LintsClean(t *testing.T) {
 	t.Parallel()
 
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         fullPortData(3),
 		LastSuccess:  collectorSuccess,
@@ -298,7 +298,7 @@ func TestCollector_OmitsInvalidValues(t *testing.T) {
 
 	// An empty PortData is what the fixture-gated decoder returns today: no
 	// value is valid, so no data series may appear.
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		LastSuccess:  collectorSuccess,
 		LastDuration: 700 * time.Millisecond,
@@ -325,7 +325,7 @@ func TestCollector_OmitsInvalidValuesWithPartialData(t *testing.T) {
 			RawBERLane:            []LaneValue{{Lane: 1, Value: 3e-09}},
 		},
 	}
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         data,
 		LastSuccess:  collectorSuccess,
@@ -370,7 +370,7 @@ mlxlink_raw_physical_ber_lane{device="mlx5_0",lane="1",pci_addr="0000:1a:00.0",p
 func TestCollector_StaleSuppressesData(t *testing.T) {
 	t.Parallel()
 
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         fullPortData(3),
 		LastSuccess:  collectorSuccess,
@@ -410,7 +410,7 @@ mlxlink_collector_up{device="mlx5_0",pci_addr="0000:1a:00.0",port="1"} 1
 func TestCollector_NeverSucceededDevice(t *testing.T) {
 	t.Parallel()
 
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		LastError:    ReasonPermissionDenied,
 		LastDuration: 20 * time.Millisecond,
@@ -435,7 +435,7 @@ mlxlink_collector_up{device="mlx5_0",pci_addr="0000:1a:00.0",port="1"} 0
 func TestCollector_FailedDeviceKeepsLastData(t *testing.T) {
 	t.Parallel()
 
-	set := newSnapshotSet([]DeviceSnapshot{{
+	set := newDeviceSet([]DeviceSnapshot{{
 		Target:       collectorTarget,
 		Data:         fullPortData(3),
 		LastSuccess:  collectorSuccess,
@@ -511,7 +511,7 @@ func BenchmarkMlxlinkCollectorCollect(b *testing.B) {
 			LastDuration: 700 * time.Millisecond,
 		})
 	}
-	collector := newCollector(fakeSnapshotSource{set: newSnapshotSet(snapshots)},
+	collector := NewCollector(fakeSnapshotSource{set: newDeviceSet(snapshots)},
 		collectorStaleAfter, newDiscardLogger(), WithNow(func() time.Time { return collectorNow }))
 
 	// Large enough that Collect never blocks on the unread channel.
@@ -664,7 +664,7 @@ func TestCollectorWithPoller_ExportsRealOptionalCapture(t *testing.T) {
 
 	poller.sweep(context.Background())
 
-	collector := newCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
+	collector := NewCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
 	tests := []struct {
 		name string
 		want int
@@ -686,11 +686,11 @@ func TestCollectorWithPoller_ExportsRealEyeCapture(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setEyeResult(mlxlinkFixture(t, "mft-4.34.1-400g-eye.json"), nil)
-	poller := newPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	poller.sweep(context.Background())
-	collector := newCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
+	collector := NewCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
 	for _, tt := range []struct {
 		name string
 		want int
@@ -712,11 +712,12 @@ func TestPCIeEyeCollectorWithPoller_ExportsRealCapture(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setPCIeEyeResult(mlxlinkFixture(t, "mft-4.34.1-pcie-eye.json"), nil)
-	poller := newPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
-	collector := newPCIeEyeCollector(poller, collectorStaleAfter, newDiscardLogger(), clk.Now)
+	collector := NewPCIeEyeCollector(poller, collectorStaleAfter, newDiscardLogger(),
+		WithPCIeEyeNow(clk.Now))
 	if got := testutil.CollectAndCount(collector, "mlxlink_pcie_eye_fom"); got != 32 {
 		t.Fatalf("expected 32 PCIe Eye FOM series from real capture, got %d", got)
 	}
@@ -735,7 +736,7 @@ func TestCollectorWithPoller_ExportsRealCapture(t *testing.T) {
 
 	poller.sweep(context.Background())
 
-	collector := newCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
+	collector := NewCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
 
 	if err := testutil.CollectAndCompare(collector, strings.NewReader(expositionRealCapture),
 		"mlxlink_collector_up",

@@ -205,11 +205,15 @@ func TestExecRunner_PermissionDenied(t *testing.T) {
 func TestExecRunner_OutputTooLarge(t *testing.T) {
 	t.Parallel()
 
-	// Floods stdout forever with shell builtins only: the runner must kill it
-	// well before the (deliberately long) command timeout.
+	// Floods stdout forever with shell builtins only. Overproduction no longer
+	// stops the process, so the timeout is what ends the run; the truncated
+	// buffer still outranks the timeout when the failure is labelled.
 	script := "#!/bin/sh\nline='" + strings.Repeat("a", 1024) + "'\nwhile :; do printf '%s' \"$line\"; done\n"
 	path := writeFakeMlxlink(t, script)
-	runner := NewExecRunner(path, 20*time.Second, newDiscardLogger())
+	// The timeout is generous on purpose: the child has to push past the 4 MiB
+	// stdout cap before it fires, or the run is labelled a plain timeout. Only
+	// a failing run pays the extra seconds.
+	runner := NewExecRunner(path, 3*time.Second, newDiscardLogger())
 
 	start := time.Now()
 	out, err := runner.Run(context.Background(), "mlx5_0")
@@ -221,8 +225,11 @@ func TestExecRunner_OutputTooLarge(t *testing.T) {
 	if reason := runErrorFrom(t, err).Reason; reason != ReasonOutputTooLarge {
 		t.Fatalf("expected reason %s, got %s", ReasonOutputTooLarge, reason)
 	}
-	if elapsed > 10*time.Second {
-		t.Fatalf("expected the flooding process to be killed, took %v", elapsed)
+	// A process that never stops writing is bounded by the timeout plus the
+	// equal WaitDelay, so 6s is the real ceiling; anything past this margin
+	// means the caller is no longer bounded at all.
+	if elapsed > 8*time.Second {
+		t.Fatalf("expected the flooding process to be killed at the timeout, took %v", elapsed)
 	}
 }
 
@@ -230,8 +237,8 @@ func TestExecRunner_OutputTooLargeOnCleanExit(t *testing.T) {
 	t.Parallel()
 
 	// Writes slightly past the limit and exits successfully. The result must be
-	// rejected on the buffer state alone, never on winning the race against the
-	// kill signal.
+	// rejected on the buffer state alone, independently of how the process
+	// ended.
 	script := "#!/bin/sh\nline='" + strings.Repeat("a", 1024) + "'\n" +
 		"i=0\nwhile [ $i -lt 4100 ]; do printf '%s' \"$line\"; i=$((i+1)); done\nexit 0\n"
 	path := writeFakeMlxlink(t, script)
@@ -294,52 +301,6 @@ func TestExecRunner_ParentContextCanceledIsNotRunError(t *testing.T) {
 	var runErr *RunError
 	if errors.As(err, &runErr) {
 		t.Fatalf("shutdown must not be reported as a run error, got %v", runErr)
-	}
-}
-
-func TestKillProcessGroup_ReapedChildIsNotSignalled(t *testing.T) {
-	t.Parallel()
-
-	// After Wait the pid may already name an unrelated process group, so the
-	// kill must be refused rather than sent to a recycled pid.
-	path := writeFakeMlxlink(t, "#!/bin/sh\nexit 0\n")
-	cmd := exec.Command(path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("fake mlxlink failed: %v", err)
-	}
-
-	if err := killProcessGroup(cmd); !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("expected os.ErrProcessDone for a reaped child, got %v", err)
-	}
-}
-
-func TestKillProcessGroup_RunningChildIsKilled(t *testing.T) {
-	t.Parallel()
-
-	// The reaped-child guard must not disarm the kill that timeouts rely on.
-	path := writeFakeMlxlink(t, "#!/bin/sh\nexec sleep 30\n")
-	cmd := exec.Command(path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake mlxlink: %v", err)
-	}
-
-	if err := killProcessGroup(cmd); err != nil {
-		t.Fatalf("expected the group kill to succeed for a running child, got %v", err)
-	}
-
-	var exitErr *exec.ExitError
-	if err := cmd.Wait(); !errors.As(err, &exitErr) {
-		t.Fatalf("expected the child to be killed, got %v", err)
-	}
-}
-
-func TestKillProcessGroup_NoProcess(t *testing.T) {
-	t.Parallel()
-
-	if err := killProcessGroup(&exec.Cmd{}); !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("expected os.ErrProcessDone before the process starts, got %v", err)
 	}
 }
 

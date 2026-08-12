@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -306,7 +307,7 @@ func (f *fakeTicker) Stop() {
 func newTestPoller(t *testing.T, d discoverer, r commandRunner, clk *fakeClock) *Poller {
 	t.Helper()
 
-	return newPoller(d, r, testPollInterval, newDiscardLogger(), withClock(clk))
+	return NewPoller(d, r, testPollInterval, newDiscardLogger(), withClock(clk))
 }
 
 func errorCount(t *testing.T, p *Poller, target Target, reason ErrorReason) float64 {
@@ -341,14 +342,35 @@ func pcieEyeSnapshotFor(t *testing.T, p *Poller, device string) PCIeEyeSnapshot 
 	return snapshot
 }
 
-func deviceNames(set *snapshotSet) []string {
+// newDeviceSet builds a published set the way a sweep does, so tests can hand
+// the poller or a collector a starting point without running one.
+func newDeviceSet(snapshots []DeviceSnapshot) *snapshotSet[DeviceSnapshot] {
+	byDevice := make(map[string]DeviceSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		byDevice[snapshot.Target.Device] = snapshot
+	}
+	return &snapshotSet[DeviceSnapshot]{byDevice: byDevice}
+}
+
+func newPCIeEyeSet(snapshots []PCIeEyeSnapshot) *snapshotSet[PCIeEyeSnapshot] {
+	byDevice := make(map[string]PCIeEyeSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		byDevice[snapshot.Target.Device] = snapshot
+	}
+	return &snapshotSet[PCIeEyeSnapshot]{byDevice: byDevice}
+}
+
+// deviceNames sorts so that assertions compare membership rather than the
+// iteration order of a map, which the published set does not promise.
+func deviceNames(set *snapshotSet[DeviceSnapshot]) []string {
 	if set == nil {
 		return nil
 	}
-	names := make([]string, 0, len(set.devices))
-	for _, snapshot := range set.devices {
-		names = append(names, snapshot.Target.Device)
+	names := make([]string, 0, len(set.byDevice))
+	for device := range set.byDevice {
+		names = append(names, device)
 	}
+	slices.Sort(names)
 	return names
 }
 
@@ -359,7 +381,7 @@ func TestPoller_CollectionErrorsHelpDescribesCountedEvents(t *testing.T) {
 	poller.countError(targetMlx0, ReasonExitError)
 
 	expected := `
-# HELP mlxlink_collection_errors_total Total number of mlxlink query and decode errors, plus skipped overlapping sweeps, by reason.
+# HELP mlxlink_collection_errors_total Total number of mlxlink query and decode errors by reason.
 # TYPE mlxlink_collection_errors_total counter
 mlxlink_collection_errors_total{device="mlx5_0",pci_addr="0000:1a:00.0",port="1",reason="exit_error"} 1
 `
@@ -373,7 +395,6 @@ func TestPoller_InitialSweepPopulatesSnapshotsAndReady(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	// Discovery deliberately reports the devices out of order.
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx1, targetMlx0}), runner, clk)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -391,7 +412,7 @@ func TestPoller_InitialSweepPopulatesSnapshotsAndReady(t *testing.T) {
 		t.Fatal("expected snapshots after the initial sweep")
 	}
 	if got := deviceNames(set); len(got) != 2 || got[0] != "mlx5_0" || got[1] != "mlx5_1" {
-		t.Fatalf("expected snapshots sorted by device name, got %v", got)
+		t.Fatalf("expected every discovered device to be published, got %v", got)
 	}
 	if !poller.Ready() {
 		t.Fatal("expected the poller to be ready after a successful sweep")
@@ -460,7 +481,7 @@ func TestPoller_PartialSweepStaysVisible(t *testing.T) {
 	firstSuccess := snapshotFor(t, poller, targetMlx1.Device).LastSuccess
 
 	clk.advance(time.Minute)
-	var midSweep *snapshotSet
+	var midSweep *snapshotSet[DeviceSnapshot]
 	runner.mu.Lock()
 	runner.onCall = func(device string) {
 		if device == targetMlx1.Device {
@@ -483,6 +504,41 @@ func TestPoller_PartialSweepStaysVisible(t *testing.T) {
 	pending, _ := midSweep.lookup(targetMlx1.Device)
 	if !pending.LastSuccess.Equal(firstSuccess) {
 		t.Fatalf("expected the pending device to keep its previous value, got %v", pending.LastSuccess)
+	}
+}
+
+func TestPoller_RemovedDeviceDropsAtFirstPublishOfTheSweep(t *testing.T) {
+	t.Parallel()
+
+	removed := Target{Device: "mlx5_2", Port: "1", PCIAddr: "0000:1a:00.2", NetDev: "ens2f0np0"}
+	clk := newFakeClock(1)
+	runner := newFakeRunner(minimalMlxlinkJSON)
+	discovery := newFakeDiscoverer(
+		[]Target{targetMlx0, targetMlx1, removed},
+		[]Target{targetMlx0, targetMlx1},
+	)
+	poller := newTestPoller(t, discovery, runner, clk)
+
+	ctx := context.Background()
+	poller.sweep(ctx)
+
+	var midSweep *snapshotSet[DeviceSnapshot]
+	runner.mu.Lock()
+	runner.onCall = func(device string) {
+		if device == targetMlx1.Device {
+			midSweep = poller.Snapshots()
+		}
+	}
+	runner.mu.Unlock()
+
+	poller.sweep(ctx)
+
+	// A device discovery no longer reports is gone from the publish that
+	// follows the first collected device, not only from the last one: its data
+	// is already known to be stale.
+	if got := deviceNames(midSweep); len(got) != 2 ||
+		got[0] != targetMlx0.Device || got[1] != targetMlx1.Device {
+		t.Fatalf("expected the removed device to be absent mid sweep, got %v", got)
 	}
 }
 
@@ -601,7 +657,7 @@ func TestPoller_ShowEyeUsesEyeCombinedQuery(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -623,7 +679,7 @@ func TestPoller_EyeExitErrorFallsBackToCombined(t *testing.T) {
 	runner := newFakeRunner(mlxlinkFixture(t, "mft-4.34.1-400g-eye.json"))
 	runner.clk, runner.step = clk, 300*time.Millisecond
 	runner.setEyeResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("Eye unsupported")})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -654,7 +710,7 @@ func TestPoller_EyeAndCombinedExitErrorsFallBackToBaseline(t *testing.T) {
 	runner.setEyeResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("Eye unsupported")})
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("combined unsupported")})
 	runner.setBaselineResult(minimalMlxlinkJSON, nil)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -679,7 +735,7 @@ func TestPoller_EyeTimeoutDoesNotFallback(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(nil)
 	runner.setEyeResult(nil, &RunError{Reason: ReasonTimeout, Err: context.DeadlineExceeded})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -697,10 +753,10 @@ func TestPoller_CancellationAfterSuccessfulEyeRunDoesNotPublishOrCount(t *testin
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
-	poller.store.Store(newSnapshotSet([]DeviceSnapshot{{
+	poller.store.Store(newDeviceSet([]DeviceSnapshot{{
 		Target: targetMlx0, Data: PortData{Link: LinkInfo{State: "previous"}}, LastSuccess: previousSuccess,
 	}}))
 
@@ -723,10 +779,10 @@ func TestPoller_CancellationAfterSuccessfulCombinedFallbackDoesNotPublishOrCount
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setEyeResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("Eye unsupported")})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
-	poller.store.Store(newSnapshotSet([]DeviceSnapshot{{
+	poller.store.Store(newDeviceSet([]DeviceSnapshot{{
 		Target: targetMlx0, Data: PortData{Link: LinkInfo{State: "previous"}}, LastSuccess: previousSuccess,
 	}}))
 
@@ -771,7 +827,7 @@ func TestPoller_PCIeEyeRunsAfterAllNetworkQueries(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
@@ -793,14 +849,14 @@ func TestPoller_PCIeEyePartialSweepStaysVisible(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
 	firstSuccess := pcieEyeSnapshotFor(t, poller, targetMlx1.Device).LastSuccess
 
 	clk.advance(time.Minute)
-	var midSweep *pcieEyeSnapshotSet
+	var midSweep *snapshotSet[PCIeEyeSnapshot]
 	calls := 0
 	runner.mu.Lock()
 	runner.onCall = func(string) {
@@ -813,7 +869,7 @@ func TestPoller_PCIeEyePartialSweepStaysVisible(t *testing.T) {
 
 	poller.sweep(context.Background())
 
-	if midSweep == nil || len(midSweep.devices) != 2 {
+	if midSweep == nil || len(midSweep.byDevice) != 2 {
 		t.Fatalf("expected both PCIe Eye devices to stay published mid sweep, got %+v", midSweep)
 	}
 	updated, _ := midSweep.lookup(targetMlx0.Device)
@@ -832,7 +888,7 @@ func TestPoller_PCIeEyeFailureDoesNotAffectNetworkSnapshot(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setPCIeEyeResult(mlxlinkFixture(t, "mft-4.34.1-pcie-eye.json"), nil)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
@@ -867,10 +923,10 @@ func TestPoller_CancellationAfterSuccessfulPCIeEyeRunDoesNotPublishOrCount(t *te
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
-	poller.pcieEyeStore.Store(newPCIeEyeSnapshotSet([]PCIeEyeSnapshot{{
+	poller.pcieEyeStore.Store(newPCIeEyeSet([]PCIeEyeSnapshot{{
 		Target:      targetMlx0,
 		Data:        PCIeEye{InitialFOM: []LaneValue{{Lane: 0, Value: 145}}},
 		LastSuccess: previousSuccess,
@@ -899,12 +955,12 @@ func TestPoller_CancellationAfterSuccessfulPCIeEyeRunDoesNotPublishOrCount(t *te
 func TestPoller_PCIeEyeErrorsHaveIndependentLabels(t *testing.T) {
 	t.Parallel()
 
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), newFakeRunner(minimalMlxlinkJSON),
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), newFakeRunner(minimalMlxlinkJSON),
 		testPollInterval, newDiscardLogger(), WithShowPCIeEye(true))
 	poller.countPCIeEyeError(targetMlx0, ReasonExitError)
 
 	expected := `
-# HELP mlxlink_pcie_eye_collection_errors_total Total number of PCIe Eye query and decode errors, plus skipped overlapping sweeps, by reason.
+# HELP mlxlink_pcie_eye_collection_errors_total Total number of PCIe Eye query and decode errors by reason.
 # TYPE mlxlink_pcie_eye_collection_errors_total counter
 mlxlink_pcie_eye_collection_errors_total{device="mlx5_0",pci_addr="0000:1a:00.0",reason="exit_error"} 1
 `
@@ -926,7 +982,7 @@ func TestPoller_ExitErrorFallsBackToBaseline(t *testing.T) {
 	// them in a baseline response.
 	runner.setBaselineResult(mlxlinkFixture(t, "mft-4.34.1-400g-fec-serdes.json"), nil)
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-	previous := newSnapshotSet([]DeviceSnapshot{{
+	previous := newDeviceSet([]DeviceSnapshot{{
 		Target:      targetMlx0,
 		LastSuccess: previousSuccess,
 		LastError:   ReasonTimeout,
@@ -967,7 +1023,7 @@ func TestPoller_ExitErrorFallsBackToBaseline(t *testing.T) {
 		t.Fatalf("expected combined then baseline, got %v", order)
 	}
 
-	collector := newCollector(fakeSnapshotSource{set: newSnapshotSet([]DeviceSnapshot{snapshot})},
+	collector := NewCollector(fakeSnapshotSource{set: newDeviceSet([]DeviceSnapshot{snapshot})},
 		testPollInterval*5, newDiscardLogger(), WithNow(func() time.Time { return clk.Now() }))
 	expected := `
 # HELP mlxlink_collector_up Whether the most recent mlxlink poll for this device succeeded.
@@ -988,7 +1044,7 @@ func TestPoller_FallbackSuccessDoesNotWarn(t *testing.T) {
 	runner := newFakeRunner(nil)
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult(minimalMlxlinkJSON, nil)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		logger, withClock(clk))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -1009,7 +1065,7 @@ func TestPoller_FallbackFailureWarnsOnce(t *testing.T) {
 	runner := newFakeRunner(nil)
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult(nil, &RunError{Reason: ReasonTimeout, Err: context.DeadlineExceeded})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		logger, withClock(clk))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -1038,7 +1094,7 @@ func TestPoller_ExitErrorAndBaselineRunFailureKeepPreviousSnapshot(t *testing.T)
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult(nil, &RunError{Reason: ReasonPermissionDenied, Err: errors.New("denied")})
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-	previous := newSnapshotSet([]DeviceSnapshot{{Target: targetMlx0, Data: previousData, LastSuccess: previousSuccess}})
+	previous := newDeviceSet([]DeviceSnapshot{{Target: targetMlx0, Data: previousData, LastSuccess: previousSuccess}})
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, previous)
 	if !ok {
@@ -1070,7 +1126,7 @@ func TestPoller_ExitErrorAndInvalidBaselineJSONKeepPreviousSnapshot(t *testing.T
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult([]byte(`{"result":`), nil)
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-	previous := newSnapshotSet([]DeviceSnapshot{{
+	previous := newDeviceSet([]DeviceSnapshot{{
 		Target: targetMlx0, Data: PortData{Link: LinkInfo{State: "Active"}}, LastSuccess: previousSuccess,
 	}})
 
@@ -1181,7 +1237,7 @@ func TestPoller_FailureWarningOmitsStderr(t *testing.T) {
 	}
 	runner.setResult(nil, runErr)
 	runner.setBaselineResult(nil, runErr)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		logger, withClock(clk))
 
 	poller.sweep(context.Background())
@@ -1272,140 +1328,16 @@ func TestPoller_DiscoveryErrorKeepsPreviousSet(t *testing.T) {
 	}
 }
 
-func TestPoller_OverlappingTickCountsErrors(t *testing.T) {
-	t.Parallel()
-
-	// The drain is exercised directly: nothing in the running poller marks the
-	// end of a drain, so driving it through Run could only be synchronised by
-	// coupling the test to the select structure of the sweep loop.
-	clk := newFakeClock(2)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, clk)
-
-	ctx := context.Background()
-	poller.sweep(ctx)
-	tk := clk.NewTicker(testPollInterval)
-
-	// A sweep that finished before the next tick has nothing to drain.
-	poller.drainTicks(ctx, tk)
-	if got := testutil.CollectAndCount(poller.errors); got != 0 {
-		t.Fatalf("expected no errors without pending ticks, got %d series", got)
-	}
-
-	// A tick fired while the sweep was running: every target records it.
-	clk.tick(t)
-	clk.tick(t)
-	poller.drainTicks(ctx, tk)
-
-	for _, target := range []Target{targetMlx0, targetMlx1} {
-		if got := errorCount(t, poller, target, ReasonOverlapping); got != 1 {
-			t.Fatalf("expected 1 overlapping error for %s, got %v", target.Device, got)
-		}
-	}
-	// A real ticker coalesces the ticks it missed, so one drain never accounts
-	// for more than one; anything a fake queued beyond that is left for the
-	// next sweep.
-	if pending := len(clk.ticks); pending != 1 {
-		t.Fatalf("expected the extra tick to be left pending, got %d", pending)
-	}
-}
-
-// floodingTicker always has a tick pending, modelling ticks that keep arriving
-// while the drain is running.
-type floodingTicker struct {
-	mu    sync.Mutex
-	ch    chan time.Time
-	sends int
-}
-
-func newFloodingTicker() *floodingTicker {
-	return &floodingTicker{ch: make(chan time.Time, 1)}
-}
-
-func (f *floodingTicker) C() <-chan time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if len(f.ch) == 0 {
-		f.ch <- time.Now()
-		f.sends++
-	}
-	return f.ch
-}
-
-func (f *floodingTicker) Stop() {}
-
-func TestPoller_DrainTakesAtMostOneTick(t *testing.T) {
-	t.Parallel()
-
-	clk := newFakeClock(1)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-
-	ctx := context.Background()
-	poller.sweep(ctx)
-
-	// Ticks never stop arriving; the drain must still take a single one, so it
-	// cannot overcount and cannot starve the sweep loop.
-	tk := newFloodingTicker()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		poller.drainTicks(ctx, tk)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("drainTicks did not stop while ticks kept arriving")
-	}
-
-	if got := errorCount(t, poller, targetMlx0, ReasonOverlapping); got != 1 {
-		t.Fatalf("expected exactly one overlap per drain, got %v", got)
-	}
-
-	// The loop resumes: a following sweep still collects.
-	before := runner.callCount()
-	poller.sweep(ctx)
-	if got := runner.callCount(); got != before+1 {
-		t.Fatalf("expected the sweep to run after the drain, got %d calls", got-before)
-	}
-}
-
-func TestPoller_DrainCountsPendingRealTicker(t *testing.T) {
-	t.Parallel()
-
-	clk := newFakeClock(1)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-
-	ctx := context.Background()
-	poller.sweep(ctx)
-
-	// The production ticker, not a fake: since Go 1.23 its channel reports a
-	// length of 0 while a tick is pending, so a drain sized from len would
-	// count nothing here.
-	tk := realClock{}.NewTicker(50 * time.Millisecond)
-	defer tk.Stop()
-	time.Sleep(80 * time.Millisecond)
-
-	poller.drainTicks(ctx, tk)
-
-	if got := errorCount(t, poller, targetMlx0, ReasonOverlapping); got != 1 {
-		t.Fatalf("expected the pending tick to be counted once, got %v", got)
-	}
-}
-
-func TestPoller_RunDrainsPendingTicks(t *testing.T) {
+func TestPoller_OverlappingTickIsCountedAndDropped(t *testing.T) {
 	t.Parallel()
 
 	// Two ticks are queued before Run starts: the first drives a sweep and the
-	// second is the backlog that sweep must account for. This pins the wiring
-	// between the sweep loop and the drain.
+	// second stands for the tick that fired while that sweep was running. This
+	// pins the wiring between the sweep loop and the drain.
 	clk := newFakeClock(2)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	warnings := make(chan string, 8)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		slog.New(&notifyHandler{records: warnings}), withClock(clk))
 
 	clk.tick(t)
@@ -1419,16 +1351,26 @@ func TestPoller_RunDrainsPendingTicks(t *testing.T) {
 		poller.Run(ctx)
 	}()
 
-	// countOverlap logs after counting, so the record proves the accounting is
-	// complete.
+	// The drain logs after counting, so the record proves the accounting is
+	// complete and the assertions below do not race it.
 	select {
 	case <-warnings:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the overlap warning")
 	}
 
-	if got := errorCount(t, poller, targetMlx0, ReasonOverlapping); got != 1 {
-		t.Fatalf("expected 1 overlapping error, got %v", got)
+	expected := `
+# HELP mlxlink_sweep_overlaps_total Total number of ticks dropped because the previous sweep was still running. A growing value means the poll interval is shorter than a full sweep.
+# TYPE mlxlink_sweep_overlaps_total counter
+mlxlink_sweep_overlaps_total 1
+`
+	if err := testutil.CollectAndCompare(poller.Overlaps(), strings.NewReader(expected)); err != nil {
+		t.Fatalf("unexpected sweep overlap exposition: %v", err)
+	}
+	// The startup sweep and the one the first tick drove, and no third: the
+	// dropped tick must not start a sweep of its own.
+	if got := runner.callCount(); got != 2 {
+		t.Fatalf("expected the dropped tick not to start a sweep, got %d runner calls", got)
 	}
 
 	cancel()
@@ -1439,23 +1381,60 @@ func TestPoller_RunDrainsPendingTicks(t *testing.T) {
 	}
 }
 
+// floodingTicker always has a tick pending, modelling ticks that keep arriving
+// while the drain is running.
+type floodingTicker struct{ ch chan time.Time }
+
+func (f *floodingTicker) C() <-chan time.Time {
+	if len(f.ch) == 0 {
+		f.ch <- time.Now()
+	}
+	return f.ch
+}
+
+func (f *floodingTicker) Stop() {}
+
+func TestPoller_DrainTakesAtMostOneTick(t *testing.T) {
+	t.Parallel()
+
+	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}),
+		newFakeRunner(minimalMlxlinkJSON), newFakeClock(1))
+
+	// Ticks never stop arriving: the drain must still take a single one, so it
+	// terminates instead of starving the sweep loop, and cannot overcount.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		poller.drainTicks(context.Background(), &floodingTicker{ch: make(chan time.Time, 1)})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainTicks did not stop while ticks kept arriving")
+	}
+	if got := testutil.ToFloat64(poller.overlaps); got != 1 {
+		t.Fatalf("expected exactly one overlap per drain, got %v", got)
+	}
+}
+
 func TestPoller_OverlappingTickIgnoredDuringShutdown(t *testing.T) {
 	t.Parallel()
 
 	clk := newFakeClock(1)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-
-	poller.sweep(context.Background())
+	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}),
+		newFakeRunner(minimalMlxlinkJSON), clk)
 	tk := clk.NewTicker(testPollInterval)
 
+	// A tick taken while shutting down is not a sweep that was crowded out, so
+	// stopping the exporter must not inflate the overlap counter.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	clk.tick(t)
 	poller.drainTicks(ctx, tk)
 
-	if got := testutil.CollectAndCount(poller.errors); got != 0 {
-		t.Fatalf("expected no overlapping errors during shutdown, got %d series", got)
+	if got := testutil.ToFloat64(poller.overlaps); got != 0 {
+		t.Fatalf("expected no overlap counted during shutdown, got %v", got)
 	}
 }
 

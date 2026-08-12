@@ -9,19 +9,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-type fakePCIeEyeSnapshotSource struct{ set *pcieEyeSnapshotSet }
+type fakePCIeEyeSnapshotSource struct{ set *snapshotSet[PCIeEyeSnapshot] }
 
-func (f fakePCIeEyeSnapshotSource) PCIeEyeSnapshots() *pcieEyeSnapshotSet { return f.set }
+func (f fakePCIeEyeSnapshotSource) PCIeEyeSnapshots() *snapshotSet[PCIeEyeSnapshot] { return f.set }
 
-func newTestPCIeEyeCollector(set *pcieEyeSnapshotSet, now time.Time) *PCIeEyeCollector {
-	return newPCIeEyeCollector(fakePCIeEyeSnapshotSource{set: set}, collectorStaleAfter,
-		newDiscardLogger(), func() time.Time { return now })
+func newTestPCIeEyeCollector(set *snapshotSet[PCIeEyeSnapshot], now time.Time) *PCIeEyeCollector {
+	return NewPCIeEyeCollector(fakePCIeEyeSnapshotSource{set: set}, collectorStaleAfter,
+		newDiscardLogger(), WithPCIeEyeNow(func() time.Time { return now }))
 }
 
 func TestPCIeEyeCollector_ExportsMetricsAndSelfMonitoring(t *testing.T) {
 	t.Parallel()
 
-	set := newPCIeEyeSnapshotSet([]PCIeEyeSnapshot{{
+	set := newPCIeEyeSet([]PCIeEyeSnapshot{{
 		Target: collectorTarget,
 		Data: PCIeEye{
 			InitialFOM: []LaneValue{{Lane: 0, Value: 145}, {Lane: 15, Value: 135}},
@@ -57,7 +57,7 @@ mlxlink_pcie_eye_fom{device="mlx5_0",lane="15",pci_addr="0000:1a:00.0",stage="la
 func TestPCIeEyeCollector_FailureRetainsFreshData(t *testing.T) {
 	t.Parallel()
 
-	set := newPCIeEyeSnapshotSet([]PCIeEyeSnapshot{{
+	set := newPCIeEyeSet([]PCIeEyeSnapshot{{
 		Target:       collectorTarget,
 		Data:         PCIeEye{InitialFOM: []LaneValue{{Lane: 0, Value: 145}}},
 		LastSuccess:  collectorSuccess,
@@ -77,7 +77,7 @@ func TestPCIeEyeCollector_FailureRetainsFreshData(t *testing.T) {
 func TestPCIeEyeCollector_StaleSuppressesData(t *testing.T) {
 	t.Parallel()
 
-	set := newPCIeEyeSnapshotSet([]PCIeEyeSnapshot{{
+	set := newPCIeEyeSet([]PCIeEyeSnapshot{{
 		Target:       collectorTarget,
 		Data:         PCIeEye{InitialFOM: []LaneValue{{Lane: 0, Value: 145}}},
 		LastSuccess:  collectorSuccess,
@@ -96,7 +96,7 @@ func TestPCIeEyeCollector_StaleSuppressesData(t *testing.T) {
 func TestPCIeEyeCollector_LintsAndRegistersPedantically(t *testing.T) {
 	t.Parallel()
 
-	set := newPCIeEyeSnapshotSet([]PCIeEyeSnapshot{{
+	set := newPCIeEyeSet([]PCIeEyeSnapshot{{
 		Target:       collectorTarget,
 		Data:         PCIeEye{InitialFOM: []LaneValue{{Lane: 0, Value: 145}}},
 		LastSuccess:  collectorSuccess,

@@ -11,7 +11,7 @@ import (
 // snapshotSource is the consumer side view of the poller: the collector only
 // ever reads the published cache, never sysfs or mlxlink itself.
 type snapshotSource interface {
-	Snapshots() *snapshotSet
+	Snapshots() *snapshotSet[DeviceSnapshot]
 }
 
 // CollectorOption customises a Collector at construction time.
@@ -70,11 +70,7 @@ type Collector struct {
 
 // NewCollector returns a collector serving the poller's cache. Snapshots older
 // than staleAfter stop being exported. A nil logger falls back to slog.Default.
-func NewCollector(source *Poller, staleAfter time.Duration, logger *slog.Logger, opts ...CollectorOption) *Collector {
-	return newCollector(source, staleAfter, logger, opts...)
-}
-
-func newCollector(source snapshotSource, staleAfter time.Duration, logger *slog.Logger, opts ...CollectorOption) *Collector {
+func NewCollector(source snapshotSource, staleAfter time.Duration, logger *slog.Logger, opts ...CollectorOption) *Collector {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -195,7 +191,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	now := c.now()
-	for _, snapshot := range set.devices {
+	for _, snapshot := range set.byDevice {
 		c.collectDevice(ch, snapshot, now)
 	}
 }

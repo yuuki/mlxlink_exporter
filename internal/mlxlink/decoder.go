@@ -71,62 +71,63 @@ const datapathActivated = "DPActivated"
 const millisPerUnit = 1000
 
 // fieldAliases maps canonical base fields and top-level section names to the
-// mlxlink JSON keys that may carry them. Keys are tried in order, so a newer
-// spelling can be listed first without breaking older MFT releases.
+// one mlxlink JSON key observed to carry them. Every entry is a single MFT
+// 4.34.1 spelling; should a second spelling for the same field ever turn up in
+// a capture, this table is where the choice between them belongs.
 //
 // Verified against the MFT 4.34.1 captures in
 // testdata/mlxlink/mft-4.34.1-400g-dr4.json and
 // testdata/mlxlink/mft-4.34.1-400g-fec-serdes.json, plus the network and PCIe
 // Eye captures in the same directory.
-var fieldAliases = map[string][]string{
-	sectionModule:       {"Module Info"},
-	sectionOperational:  {"Operational Info"},
-	sectionCounters:     {"Physical Counters and BER Info"},
-	sectionFECHistogram: {"Histogram of FEC Errors"},
-	sectionSerDesTX:     {"Serdes Tuning Transmitter Info"},
-	sectionEye:          {"EYE Opening Info"},
-	sectionPCIeEye:      {"EYE Opening Info (PCIe)"},
+var fieldAliases = map[string]string{
+	sectionModule:       "Module Info",
+	sectionOperational:  "Operational Info",
+	sectionCounters:     "Physical Counters and BER Info",
+	sectionFECHistogram: "Histogram of FEC Errors",
+	sectionSerDesTX:     "Serdes Tuning Transmitter Info",
+	sectionEye:          "EYE Opening Info",
+	sectionPCIeEye:      "EYE Opening Info (PCIe)",
 
-	fieldState:           {"State"},
-	fieldPhysicalState:   {"Physical state"},
-	fieldSpeed:           {"Speed"},
-	fieldWidth:           {"Width"},
-	fieldFEC:             {"FEC"},
-	fieldAutoNegotiation: {"Auto Negotiation"},
+	fieldState:           "State",
+	fieldPhysicalState:   "Physical state",
+	fieldSpeed:           "Speed",
+	fieldWidth:           "Width",
+	fieldFEC:             "FEC",
+	fieldAutoNegotiation: "Auto Negotiation",
 
-	fieldEffectivePhysicalErrors: {"Effective Physical Errors"},
-	fieldLinkDown:                {"Link Down Counter"},
-	fieldLinkErrorRecovery:       {"Link Error Recovery Counter"},
-	fieldEffectiveBER:            {"Effective Physical BER"},
-	fieldRawBER:                  {"Raw Physical BER"},
-	fieldRawBERPerLane:           {"Raw Physical BER Per Lane"},
-	fieldRawErrorsPerLane:        {"Raw Physical Errors Per Lane"},
+	fieldEffectivePhysicalErrors: "Effective Physical Errors",
+	fieldLinkDown:                "Link Down Counter",
+	fieldLinkErrorRecovery:       "Link Error Recovery Counter",
+	fieldEffectiveBER:            "Effective Physical BER",
+	fieldRawBER:                  "Raw Physical BER",
+	fieldRawBERPerLane:           "Raw Physical BER Per Lane",
+	fieldRawErrorsPerLane:        "Raw Physical Errors Per Lane",
 
-	fieldTemperature:     {"Temperature [C]"},
-	fieldVoltage:         {"Voltage [mV]"},
-	fieldBiasCurrent:     {"Bias Current [mA]"},
-	fieldRxPower:         {"Rx Power Current [dBm]"},
-	fieldTxPower:         {"Tx Power Current [dBm]"},
-	fieldModuleFWFault:   {"Module FW Fault"},
-	fieldDatapathFWFault: {"DataPath FW Fault"},
-	fieldTxFault:         {"Tx Fault [per lane]"},
-	fieldTxLOS:           {"Tx LOS [per lane]"},
-	fieldRxLOS:           {"Rx LOS [per lane]"},
-	fieldTxCDRLOL:        {"Tx CDR LOL [per lane]"},
-	fieldRxCDRLOL:        {"Rx CDR LOL [per lane]"},
-	fieldDatapathState:   {"DataPath state [per lane]"},
+	fieldTemperature:     "Temperature [C]",
+	fieldVoltage:         "Voltage [mV]",
+	fieldBiasCurrent:     "Bias Current [mA]",
+	fieldRxPower:         "Rx Power Current [dBm]",
+	fieldTxPower:         "Tx Power Current [dBm]",
+	fieldModuleFWFault:   "Module FW Fault",
+	fieldDatapathFWFault: "DataPath FW Fault",
+	fieldTxFault:         "Tx Fault [per lane]",
+	fieldTxLOS:           "Tx LOS [per lane]",
+	fieldRxLOS:           "Rx LOS [per lane]",
+	fieldTxCDRLOL:        "Tx CDR LOL [per lane]",
+	fieldRxCDRLOL:        "Rx CDR LOL [per lane]",
+	fieldDatapathState:   "DataPath state [per lane]",
 
-	fieldIdentifier:   {"Identifier"},
-	fieldVendor:       {"Vendor Name"},
-	fieldPartNumber:   {"Vendor Part Number"},
-	fieldSerialNumber: {"Vendor Serial Number"},
-	fieldRevision:     {"Rev"},
+	fieldIdentifier:   "Identifier",
+	fieldVendor:       "Vendor Name",
+	fieldPartNumber:   "Vendor Part Number",
+	fieldSerialNumber: "Vendor Serial Number",
+	fieldRevision:     "Rev",
 	// The module firmware. The "Firmware Version" of Tool Information is the
 	// adapter firmware and belongs to a different device.
-	fieldFirmwareVersion:       {"FW Version"},
-	fieldActiveHostCompliance:  {"Active Set Host Compliance Code"},
-	fieldActiveMediaCompliance: {"Active Set Media Compliance Code"},
-	fieldCableType:             {"Cable Type"},
+	fieldFirmwareVersion:       "FW Version",
+	fieldActiveHostCompliance:  "Active Set Host Compliance Code",
+	fieldActiveMediaCompliance: "Active Set Media Compliance Code",
+	fieldCableType:             "Cable Type",
 }
 
 var errNoOutput = errors.New("missing result.output")
@@ -553,27 +554,20 @@ func decodeModule(sec section) Module {
 // sectionOf resolves a section by its canonical name. A section that is absent
 // or not an object yields a nil section, which reads as all fields missing.
 func sectionOf(output map[string]json.RawMessage, canonical string) section {
-	for _, key := range fieldAliases[canonical] {
-		raw, ok := output[key]
-		if !ok {
-			continue
-		}
-		var sec section
-		if err := json.Unmarshal(raw, &sec); err != nil {
-			return nil
-		}
-		return sec
+	raw, ok := output[fieldAliases[canonical]]
+	if !ok {
+		return nil
 	}
-	return nil
+	var sec section
+	if err := json.Unmarshal(raw, &sec); err != nil {
+		return nil
+	}
+	return sec
 }
 
 func lookupField(sec section, canonical string) (json.RawMessage, bool) {
-	for _, key := range fieldAliases[canonical] {
-		if raw, ok := sec[key]; ok {
-			return raw, true
-		}
-	}
-	return nil, false
+	raw, ok := sec[fieldAliases[canonical]]
+	return raw, ok
 }
 
 // stringField reads a scalar field. A value mlxlink reports as an object (the
@@ -721,35 +715,18 @@ func divideValue(value Value, divisor float64) Value {
 // exported as a fabricated number. Non-finite results are treated the same way:
 // Prometheus must never receive Inf or NaN from us.
 func parseFloatSafe(s string) Value {
-	trimmed := strings.TrimSpace(s)
+	// The bracketed range is the one suffix mlxlink puts on a measured scalar
+	// ("61 [-10..80]"); past it, the whole text has to be a number. A value
+	// only partly readable is not a measurement, so it is dropped.
+	trimmed := trimRangeSuffix(s)
 	if trimmed == "" || strings.EqualFold(trimmed, "n/a") {
 		return Value{}
 	}
 
+	// An out of range value is rejected along with the malformed ones: the
+	// saturated ±Inf ParseFloat hands back is not the number that was
+	// measured, and exporting it would be wrong by orders of magnitude.
 	f, err := strconv.ParseFloat(trimmed, 64)
-	if err == nil {
-		return finiteValue(f)
-	}
-	// Out of float64 range in either direction. Neither the saturated result
-	// nor a shortened prefix would be the number that was measured, so the
-	// sample is dropped rather than reported off by orders of magnitude.
-	if errors.Is(err, strconv.ErrRange) {
-		return Value{}
-	}
-
-	// Hexadecimal notation must not fall through to the prefix scan below,
-	// which would silently read "0x1f" as 0.
-	if hasHexPrefix(trimmed) {
-		return Value{}
-	}
-
-	// mlxlink appends units and ranges ("3.3V", "61 [-10..80]"): read the
-	// leading number and ignore the suffix, which does not change the value.
-	prefix, ok := leadingNumber(trimmed)
-	if !ok {
-		return Value{}
-	}
-	f, err = strconv.ParseFloat(prefix, 64)
 	if err != nil {
 		return Value{}
 	}
@@ -762,57 +739,3 @@ func finiteValue(f float64) Value {
 	}
 	return Value{Float: f, Valid: true}
 }
-
-func hasHexPrefix(s string) bool {
-	s = strings.TrimLeft(s, "+-")
-	return len(s) > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')
-}
-
-// leadingNumber returns the longest prefix of s that is a well formed float
-// literal, in a single pass. It only engages on values that start like a
-// number, so words are never mined for digits.
-//
-// An exponent marker with no digits after it ("1e", "1E-") makes the whole
-// input unreadable instead of decaying to its mantissa: truncated output like
-// "1e-255" cut short would otherwise be reported as 1.
-func leadingNumber(s string) (prefix string, ok bool) {
-	i := 0
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
-		i++
-	}
-
-	digits := 0
-	for i < len(s) && isDigit(s[i]) {
-		i++
-		digits++
-	}
-	if i < len(s) && s[i] == '.' {
-		i++
-		for i < len(s) && isDigit(s[i]) {
-			i++
-			digits++
-		}
-	}
-	if digits == 0 {
-		return "", false
-	}
-
-	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
-		j := i + 1
-		if j < len(s) && (s[j] == '+' || s[j] == '-') {
-			j++
-		}
-		expDigits := 0
-		for j < len(s) && isDigit(s[j]) {
-			j++
-			expDigits++
-		}
-		if expDigits == 0 {
-			return "", false
-		}
-		i = j
-	}
-	return s[:i], true
-}
-
-func isDigit(c byte) bool { return c >= '0' && c <= '9' }

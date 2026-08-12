@@ -69,10 +69,15 @@ sudo -u mlxlink_exporter /usr/bin/mlxlink -d mlx5_0 \
   --port_type PCIE --show_eye --json
 ```
 
+If a command does not succeed here, leave the corresponding flag disabled: an unsupported network Eye query is retried through the fallback on every sweep, and an unsupported PCIe Eye query, which has no fallback, simply fails on every sweep. Both costs are described below.
+
 ## Operational behavior
 
 - `/healthz` is liveness; `/readyz` returns 503 until a device has been collected and remains 503 on hosts with no RDMA devices.
 - Scrapes read an immutable cache. Only `--poll-interval` controls `mlxlink` execution frequency.
 - Network Eye and PCIe Eye default to disabled. PCIe Eye runs after network collection and failures are isolated from network snapshots, readiness, and `mlxlink_collector_up`.
+- A rejected query is retried every sweep. The fallback is decided per device per sweep and nothing is remembered between sweeps, so on a host where `--show_eye` always exits non-zero every sweep runs `mlxlink` twice per device instead of once, or three times if the `--rx_fec_histogram --show_histogram --show_serdes_tx` extras are rejected as well. Treat a steadily rising `mlxlink_collection_errors_total{reason="exit_error"}` while the network Eye flag (`--show-eye`) is enabled — with `mlxlink_collector_up` still 1 — as "this query is not supported here": disable the flag. The exporter already publishes what the fallback returns, so the extra invocations buy nothing and lengthen the sweep.
+- An unsupported PCIe Eye query is cheaper but equally pointless. It has no fallback, so it costs one failing invocation per device per sweep, and it is visible on its own metrics only: `mlxlink_pcie_eye_collection_errors_total{reason="exit_error"}` rising with `mlxlink_pcie_eye_collector_up` at 0. PCIe Eye failures never appear in `mlxlink_collection_errors_total`, so judge `--show-pcie-eye` by the PCIe metrics alone.
+- Watch `mlxlink_sweep_overlaps_total`. It counts ticks dropped because the previous sweep was still running, so any sustained increase means the sweep does not fit inside `--poll-interval` and the interval must be raised (or devices excluded).
 - Update this guide and the systemd assets whenever a new flag or metric changes deployment behavior.
 
