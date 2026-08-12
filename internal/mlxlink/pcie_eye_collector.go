@@ -9,7 +9,7 @@ import (
 )
 
 type pcieEyeSnapshotSource interface {
-	PCIeEyeSnapshots() *pcieEyeSnapshotSet
+	PCIeEyeSnapshots() *snapshotSet[PCIeEyeSnapshot]
 }
 
 // PCIeEyeCollector exports the independently cached root PCIe Eye telemetry.
@@ -74,7 +74,7 @@ func (c *PCIeEyeCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	now := c.now()
-	for _, snapshot := range set.devices {
+	for _, snapshot := range set.byDevice {
 		labels := []string{snapshot.Target.Device, snapshot.Target.PCIAddr}
 		up := 0.0
 		if snapshot.LastError == "" && !snapshot.LastSuccess.IsZero() {

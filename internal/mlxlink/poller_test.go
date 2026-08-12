@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -341,14 +342,35 @@ func pcieEyeSnapshotFor(t *testing.T, p *Poller, device string) PCIeEyeSnapshot 
 	return snapshot
 }
 
-func deviceNames(set *snapshotSet) []string {
+// newDeviceSet builds a published set the way a sweep does, so tests can hand
+// the poller or a collector a starting point without running one.
+func newDeviceSet(snapshots []DeviceSnapshot) *snapshotSet[DeviceSnapshot] {
+	byDevice := make(map[string]DeviceSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		byDevice[snapshot.Target.Device] = snapshot
+	}
+	return &snapshotSet[DeviceSnapshot]{byDevice: byDevice}
+}
+
+func newPCIeEyeSet(snapshots []PCIeEyeSnapshot) *snapshotSet[PCIeEyeSnapshot] {
+	byDevice := make(map[string]PCIeEyeSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		byDevice[snapshot.Target.Device] = snapshot
+	}
+	return &snapshotSet[PCIeEyeSnapshot]{byDevice: byDevice}
+}
+
+// deviceNames sorts so that assertions compare membership rather than the
+// iteration order of a map, which the published set does not promise.
+func deviceNames(set *snapshotSet[DeviceSnapshot]) []string {
 	if set == nil {
 		return nil
 	}
-	names := make([]string, 0, len(set.devices))
-	for _, snapshot := range set.devices {
-		names = append(names, snapshot.Target.Device)
+	names := make([]string, 0, len(set.byDevice))
+	for device := range set.byDevice {
+		names = append(names, device)
 	}
+	slices.Sort(names)
 	return names
 }
 
@@ -373,7 +395,6 @@ func TestPoller_InitialSweepPopulatesSnapshotsAndReady(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	// Discovery deliberately reports the devices out of order.
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx1, targetMlx0}), runner, clk)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -391,7 +412,7 @@ func TestPoller_InitialSweepPopulatesSnapshotsAndReady(t *testing.T) {
 		t.Fatal("expected snapshots after the initial sweep")
 	}
 	if got := deviceNames(set); len(got) != 2 || got[0] != "mlx5_0" || got[1] != "mlx5_1" {
-		t.Fatalf("expected snapshots sorted by device name, got %v", got)
+		t.Fatalf("expected every discovered device to be published, got %v", got)
 	}
 	if !poller.Ready() {
 		t.Fatal("expected the poller to be ready after a successful sweep")
@@ -460,7 +481,7 @@ func TestPoller_PartialSweepStaysVisible(t *testing.T) {
 	firstSuccess := snapshotFor(t, poller, targetMlx1.Device).LastSuccess
 
 	clk.advance(time.Minute)
-	var midSweep *snapshotSet
+	var midSweep *snapshotSet[DeviceSnapshot]
 	runner.mu.Lock()
 	runner.onCall = func(device string) {
 		if device == targetMlx1.Device {
@@ -483,6 +504,41 @@ func TestPoller_PartialSweepStaysVisible(t *testing.T) {
 	pending, _ := midSweep.lookup(targetMlx1.Device)
 	if !pending.LastSuccess.Equal(firstSuccess) {
 		t.Fatalf("expected the pending device to keep its previous value, got %v", pending.LastSuccess)
+	}
+}
+
+func TestPoller_RemovedDeviceDropsAtFirstPublishOfTheSweep(t *testing.T) {
+	t.Parallel()
+
+	removed := Target{Device: "mlx5_2", Port: "1", PCIAddr: "0000:1a:00.2", NetDev: "ens2f0np0"}
+	clk := newFakeClock(1)
+	runner := newFakeRunner(minimalMlxlinkJSON)
+	discovery := newFakeDiscoverer(
+		[]Target{targetMlx0, targetMlx1, removed},
+		[]Target{targetMlx0, targetMlx1},
+	)
+	poller := newTestPoller(t, discovery, runner, clk)
+
+	ctx := context.Background()
+	poller.sweep(ctx)
+
+	var midSweep *snapshotSet[DeviceSnapshot]
+	runner.mu.Lock()
+	runner.onCall = func(device string) {
+		if device == targetMlx1.Device {
+			midSweep = poller.Snapshots()
+		}
+	}
+	runner.mu.Unlock()
+
+	poller.sweep(ctx)
+
+	// A device discovery no longer reports is gone from the publish that
+	// follows the first collected device, not only from the last one: its data
+	// is already known to be stale.
+	if got := deviceNames(midSweep); len(got) != 2 ||
+		got[0] != targetMlx0.Device || got[1] != targetMlx1.Device {
+		t.Fatalf("expected the removed device to be absent mid sweep, got %v", got)
 	}
 }
 
@@ -700,7 +756,7 @@ func TestPoller_CancellationAfterSuccessfulEyeRunDoesNotPublishOrCount(t *testin
 	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
-	poller.store.Store(newSnapshotSet([]DeviceSnapshot{{
+	poller.store.Store(newDeviceSet([]DeviceSnapshot{{
 		Target: targetMlx0, Data: PortData{Link: LinkInfo{State: "previous"}}, LastSuccess: previousSuccess,
 	}}))
 
@@ -726,7 +782,7 @@ func TestPoller_CancellationAfterSuccessfulCombinedFallbackDoesNotPublishOrCount
 	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
-	poller.store.Store(newSnapshotSet([]DeviceSnapshot{{
+	poller.store.Store(newDeviceSet([]DeviceSnapshot{{
 		Target: targetMlx0, Data: PortData{Link: LinkInfo{State: "previous"}}, LastSuccess: previousSuccess,
 	}}))
 
@@ -800,7 +856,7 @@ func TestPoller_PCIeEyePartialSweepStaysVisible(t *testing.T) {
 	firstSuccess := pcieEyeSnapshotFor(t, poller, targetMlx1.Device).LastSuccess
 
 	clk.advance(time.Minute)
-	var midSweep *pcieEyeSnapshotSet
+	var midSweep *snapshotSet[PCIeEyeSnapshot]
 	calls := 0
 	runner.mu.Lock()
 	runner.onCall = func(string) {
@@ -813,7 +869,7 @@ func TestPoller_PCIeEyePartialSweepStaysVisible(t *testing.T) {
 
 	poller.sweep(context.Background())
 
-	if midSweep == nil || len(midSweep.devices) != 2 {
+	if midSweep == nil || len(midSweep.byDevice) != 2 {
 		t.Fatalf("expected both PCIe Eye devices to stay published mid sweep, got %+v", midSweep)
 	}
 	updated, _ := midSweep.lookup(targetMlx0.Device)
@@ -870,7 +926,7 @@ func TestPoller_CancellationAfterSuccessfulPCIeEyeRunDoesNotPublishOrCount(t *te
 	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
-	poller.pcieEyeStore.Store(newPCIeEyeSnapshotSet([]PCIeEyeSnapshot{{
+	poller.pcieEyeStore.Store(newPCIeEyeSet([]PCIeEyeSnapshot{{
 		Target:      targetMlx0,
 		Data:        PCIeEye{InitialFOM: []LaneValue{{Lane: 0, Value: 145}}},
 		LastSuccess: previousSuccess,
@@ -926,7 +982,7 @@ func TestPoller_ExitErrorFallsBackToBaseline(t *testing.T) {
 	// them in a baseline response.
 	runner.setBaselineResult(mlxlinkFixture(t, "mft-4.34.1-400g-fec-serdes.json"), nil)
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-	previous := newSnapshotSet([]DeviceSnapshot{{
+	previous := newDeviceSet([]DeviceSnapshot{{
 		Target:      targetMlx0,
 		LastSuccess: previousSuccess,
 		LastError:   ReasonTimeout,
@@ -967,7 +1023,7 @@ func TestPoller_ExitErrorFallsBackToBaseline(t *testing.T) {
 		t.Fatalf("expected combined then baseline, got %v", order)
 	}
 
-	collector := newCollector(fakeSnapshotSource{set: newSnapshotSet([]DeviceSnapshot{snapshot})},
+	collector := newCollector(fakeSnapshotSource{set: newDeviceSet([]DeviceSnapshot{snapshot})},
 		testPollInterval*5, newDiscardLogger(), WithNow(func() time.Time { return clk.Now() }))
 	expected := `
 # HELP mlxlink_collector_up Whether the most recent mlxlink poll for this device succeeded.
@@ -1038,7 +1094,7 @@ func TestPoller_ExitErrorAndBaselineRunFailureKeepPreviousSnapshot(t *testing.T)
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult(nil, &RunError{Reason: ReasonPermissionDenied, Err: errors.New("denied")})
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-	previous := newSnapshotSet([]DeviceSnapshot{{Target: targetMlx0, Data: previousData, LastSuccess: previousSuccess}})
+	previous := newDeviceSet([]DeviceSnapshot{{Target: targetMlx0, Data: previousData, LastSuccess: previousSuccess}})
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, previous)
 	if !ok {
@@ -1070,7 +1126,7 @@ func TestPoller_ExitErrorAndInvalidBaselineJSONKeepPreviousSnapshot(t *testing.T
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult([]byte(`{"result":`), nil)
 	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-	previous := newSnapshotSet([]DeviceSnapshot{{
+	previous := newDeviceSet([]DeviceSnapshot{{
 		Target: targetMlx0, Data: PortData{Link: LinkInfo{State: "Active"}}, LastSuccess: previousSuccess,
 	}})
 

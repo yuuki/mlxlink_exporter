@@ -11,7 +11,7 @@ import (
 // snapshotSource is the consumer side view of the poller: the collector only
 // ever reads the published cache, never sysfs or mlxlink itself.
 type snapshotSource interface {
-	Snapshots() *snapshotSet
+	Snapshots() *snapshotSet[DeviceSnapshot]
 }
 
 // CollectorOption customises a Collector at construction time.
@@ -195,7 +195,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	now := c.now()
-	for _, snapshot := range set.devices {
+	for _, snapshot := range set.byDevice {
 		c.collectDevice(ch, snapshot, now)
 	}
 }
