@@ -1381,6 +1381,63 @@ mlxlink_sweep_overlaps_total 1
 	}
 }
 
+// floodingTicker always has a tick pending, modelling ticks that keep arriving
+// while the drain is running.
+type floodingTicker struct{ ch chan time.Time }
+
+func (f *floodingTicker) C() <-chan time.Time {
+	if len(f.ch) == 0 {
+		f.ch <- time.Now()
+	}
+	return f.ch
+}
+
+func (f *floodingTicker) Stop() {}
+
+func TestPoller_DrainTakesAtMostOneTick(t *testing.T) {
+	t.Parallel()
+
+	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}),
+		newFakeRunner(minimalMlxlinkJSON), newFakeClock(1))
+
+	// Ticks never stop arriving: the drain must still take a single one, so it
+	// terminates instead of starving the sweep loop, and cannot overcount.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		poller.drainTicks(context.Background(), &floodingTicker{ch: make(chan time.Time, 1)})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainTicks did not stop while ticks kept arriving")
+	}
+	if got := testutil.ToFloat64(poller.overlaps); got != 1 {
+		t.Fatalf("expected exactly one overlap per drain, got %v", got)
+	}
+}
+
+func TestPoller_OverlappingTickIgnoredDuringShutdown(t *testing.T) {
+	t.Parallel()
+
+	clk := newFakeClock(1)
+	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}),
+		newFakeRunner(minimalMlxlinkJSON), clk)
+	tk := clk.NewTicker(testPollInterval)
+
+	// A tick taken while shutting down is not a sweep that was crowded out, so
+	// stopping the exporter must not inflate the overlap counter.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	clk.tick(t)
+	poller.drainTicks(ctx, tk)
+
+	if got := testutil.ToFloat64(poller.overlaps); got != 0 {
+		t.Fatalf("expected no overlap counted during shutdown, got %v", got)
+	}
+}
+
 func TestPoller_ShutdownDoesNotCountErrors(t *testing.T) {
 	t.Parallel()
 

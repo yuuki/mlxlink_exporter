@@ -210,7 +210,10 @@ func TestExecRunner_OutputTooLarge(t *testing.T) {
 	// buffer still outranks the timeout when the failure is labelled.
 	script := "#!/bin/sh\nline='" + strings.Repeat("a", 1024) + "'\nwhile :; do printf '%s' \"$line\"; done\n"
 	path := writeFakeMlxlink(t, script)
-	runner := NewExecRunner(path, time.Second, newDiscardLogger())
+	// The timeout is generous on purpose: the child has to push past the 4 MiB
+	// stdout cap before it fires, or the run is labelled a plain timeout. Only
+	// a failing run pays the extra seconds.
+	runner := NewExecRunner(path, 3*time.Second, newDiscardLogger())
 
 	start := time.Now()
 	out, err := runner.Run(context.Background(), "mlx5_0")
@@ -222,7 +225,10 @@ func TestExecRunner_OutputTooLarge(t *testing.T) {
 	if reason := runErrorFrom(t, err).Reason; reason != ReasonOutputTooLarge {
 		t.Fatalf("expected reason %s, got %s", ReasonOutputTooLarge, reason)
 	}
-	if elapsed > 10*time.Second {
+	// A process that never stops writing is bounded by the timeout plus the
+	// equal WaitDelay, so 6s is the real ceiling; anything past this margin
+	// means the caller is no longer bounded at all.
+	if elapsed > 8*time.Second {
 		t.Fatalf("expected the flooding process to be killed at the timeout, took %v", elapsed)
 	}
 }
