@@ -381,7 +381,7 @@ func TestPoller_CollectionErrorsHelpDescribesCountedEvents(t *testing.T) {
 	poller.countError(targetMlx0, ReasonExitError)
 
 	expected := `
-# HELP mlxlink_collection_errors_total Total number of mlxlink query and decode errors, plus skipped overlapping sweeps, by reason.
+# HELP mlxlink_collection_errors_total Total number of mlxlink query and decode errors by reason.
 # TYPE mlxlink_collection_errors_total counter
 mlxlink_collection_errors_total{device="mlx5_0",pci_addr="0000:1a:00.0",port="1",reason="exit_error"} 1
 `
@@ -960,7 +960,7 @@ func TestPoller_PCIeEyeErrorsHaveIndependentLabels(t *testing.T) {
 	poller.countPCIeEyeError(targetMlx0, ReasonExitError)
 
 	expected := `
-# HELP mlxlink_pcie_eye_collection_errors_total Total number of PCIe Eye query and decode errors, plus skipped overlapping sweeps, by reason.
+# HELP mlxlink_pcie_eye_collection_errors_total Total number of PCIe Eye query and decode errors by reason.
 # TYPE mlxlink_pcie_eye_collection_errors_total counter
 mlxlink_pcie_eye_collection_errors_total{device="mlx5_0",pci_addr="0000:1a:00.0",reason="exit_error"} 1
 `
@@ -1328,136 +1328,12 @@ func TestPoller_DiscoveryErrorKeepsPreviousSet(t *testing.T) {
 	}
 }
 
-func TestPoller_OverlappingTickCountsErrors(t *testing.T) {
-	t.Parallel()
-
-	// The drain is exercised directly: nothing in the running poller marks the
-	// end of a drain, so driving it through Run could only be synchronised by
-	// coupling the test to the select structure of the sweep loop.
-	clk := newFakeClock(2)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, clk)
-
-	ctx := context.Background()
-	poller.sweep(ctx)
-	tk := clk.NewTicker(testPollInterval)
-
-	// A sweep that finished before the next tick has nothing to drain.
-	poller.drainTicks(ctx, tk)
-	if got := testutil.CollectAndCount(poller.errors); got != 0 {
-		t.Fatalf("expected no errors without pending ticks, got %d series", got)
-	}
-
-	// A tick fired while the sweep was running: every target records it.
-	clk.tick(t)
-	clk.tick(t)
-	poller.drainTicks(ctx, tk)
-
-	for _, target := range []Target{targetMlx0, targetMlx1} {
-		if got := errorCount(t, poller, target, ReasonOverlapping); got != 1 {
-			t.Fatalf("expected 1 overlapping error for %s, got %v", target.Device, got)
-		}
-	}
-	// A real ticker coalesces the ticks it missed, so one drain never accounts
-	// for more than one; anything a fake queued beyond that is left for the
-	// next sweep.
-	if pending := len(clk.ticks); pending != 1 {
-		t.Fatalf("expected the extra tick to be left pending, got %d", pending)
-	}
-}
-
-// floodingTicker always has a tick pending, modelling ticks that keep arriving
-// while the drain is running.
-type floodingTicker struct {
-	mu    sync.Mutex
-	ch    chan time.Time
-	sends int
-}
-
-func newFloodingTicker() *floodingTicker {
-	return &floodingTicker{ch: make(chan time.Time, 1)}
-}
-
-func (f *floodingTicker) C() <-chan time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if len(f.ch) == 0 {
-		f.ch <- time.Now()
-		f.sends++
-	}
-	return f.ch
-}
-
-func (f *floodingTicker) Stop() {}
-
-func TestPoller_DrainTakesAtMostOneTick(t *testing.T) {
-	t.Parallel()
-
-	clk := newFakeClock(1)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-
-	ctx := context.Background()
-	poller.sweep(ctx)
-
-	// Ticks never stop arriving; the drain must still take a single one, so it
-	// cannot overcount and cannot starve the sweep loop.
-	tk := newFloodingTicker()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		poller.drainTicks(ctx, tk)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("drainTicks did not stop while ticks kept arriving")
-	}
-
-	if got := errorCount(t, poller, targetMlx0, ReasonOverlapping); got != 1 {
-		t.Fatalf("expected exactly one overlap per drain, got %v", got)
-	}
-
-	// The loop resumes: a following sweep still collects.
-	before := runner.callCount()
-	poller.sweep(ctx)
-	if got := runner.callCount(); got != before+1 {
-		t.Fatalf("expected the sweep to run after the drain, got %d calls", got-before)
-	}
-}
-
-func TestPoller_DrainCountsPendingRealTicker(t *testing.T) {
-	t.Parallel()
-
-	clk := newFakeClock(1)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-
-	ctx := context.Background()
-	poller.sweep(ctx)
-
-	// The production ticker, not a fake: since Go 1.23 its channel reports a
-	// length of 0 while a tick is pending, so a drain sized from len would
-	// count nothing here.
-	tk := realClock{}.NewTicker(50 * time.Millisecond)
-	defer tk.Stop()
-	time.Sleep(80 * time.Millisecond)
-
-	poller.drainTicks(ctx, tk)
-
-	if got := errorCount(t, poller, targetMlx0, ReasonOverlapping); got != 1 {
-		t.Fatalf("expected the pending tick to be counted once, got %v", got)
-	}
-}
-
-func TestPoller_RunDrainsPendingTicks(t *testing.T) {
+func TestPoller_OverlappingTickIsCountedAndDropped(t *testing.T) {
 	t.Parallel()
 
 	// Two ticks are queued before Run starts: the first drives a sweep and the
-	// second is the backlog that sweep must account for. This pins the wiring
-	// between the sweep loop and the drain.
+	// second stands for the tick that fired while that sweep was running. This
+	// pins the wiring between the sweep loop and the drain.
 	clk := newFakeClock(2)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	warnings := make(chan string, 8)
@@ -1475,16 +1351,26 @@ func TestPoller_RunDrainsPendingTicks(t *testing.T) {
 		poller.Run(ctx)
 	}()
 
-	// countOverlap logs after counting, so the record proves the accounting is
-	// complete.
+	// The drain logs after counting, so the record proves the accounting is
+	// complete and the assertions below do not race it.
 	select {
 	case <-warnings:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the overlap warning")
 	}
 
-	if got := errorCount(t, poller, targetMlx0, ReasonOverlapping); got != 1 {
-		t.Fatalf("expected 1 overlapping error, got %v", got)
+	expected := `
+# HELP mlxlink_sweep_overlaps_total Total number of ticks dropped because the previous sweep was still running. A growing value means the poll interval is shorter than a full sweep.
+# TYPE mlxlink_sweep_overlaps_total counter
+mlxlink_sweep_overlaps_total 1
+`
+	if err := testutil.CollectAndCompare(poller.Overlaps(), strings.NewReader(expected)); err != nil {
+		t.Fatalf("unexpected sweep overlap exposition: %v", err)
+	}
+	// The startup sweep and the one the first tick drove, and no third: the
+	// dropped tick must not start a sweep of its own.
+	if got := runner.callCount(); got != 2 {
+		t.Fatalf("expected the dropped tick not to start a sweep, got %d runner calls", got)
 	}
 
 	cancel()
@@ -1492,26 +1378,6 @@ func TestPoller_RunDrainsPendingTicks(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancellation")
-	}
-}
-
-func TestPoller_OverlappingTickIgnoredDuringShutdown(t *testing.T) {
-	t.Parallel()
-
-	clk := newFakeClock(1)
-	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newTestPoller(t, newFakeDiscoverer([]Target{targetMlx0}), runner, clk)
-
-	poller.sweep(context.Background())
-	tk := clk.NewTicker(testPollInterval)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	clk.tick(t)
-	poller.drainTicks(ctx, tk)
-
-	if got := testutil.CollectAndCount(poller.errors); got != 0 {
-		t.Fatalf("expected no overlapping errors during shutdown, got %d series", got)
 	}
 }
 

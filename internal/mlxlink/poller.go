@@ -104,6 +104,7 @@ type Poller struct {
 	pcieEyeStore  atomic.Pointer[snapshotSet[PCIeEyeSnapshot]]
 	errors        *prometheus.CounterVec
 	pcieEyeErrors *prometheus.CounterVec
+	overlaps      prometheus.Counter
 	ready         atomic.Bool
 }
 
@@ -144,12 +145,16 @@ func newPoller(discovery discoverer, runner commandRunner, interval time.Duratio
 		logger:    logger,
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mlxlink_collection_errors_total",
-			Help: "Total number of mlxlink query and decode errors, plus skipped overlapping sweeps, by reason.",
+			Help: "Total number of mlxlink query and decode errors by reason.",
 		}, []string{"device", "port", "pci_addr", "reason"}),
 		pcieEyeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mlxlink_pcie_eye_collection_errors_total",
-			Help: "Total number of PCIe Eye query and decode errors, plus skipped overlapping sweeps, by reason.",
+			Help: "Total number of PCIe Eye query and decode errors by reason.",
 		}, []string{"device", "pci_addr", "reason"}),
+		overlaps: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "mlxlink_sweep_overlaps_total",
+			Help: "Total number of ticks dropped because the previous sweep was still running. A growing value means the poll interval is shorter than a full sweep.",
+		}),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -162,6 +167,9 @@ func (p *Poller) Errors() prometheus.Collector { return p.errors }
 
 // PCIeEyeErrors exposes the independent PCIe Eye collection error counter.
 func (p *Poller) PCIeEyeErrors() prometheus.Collector { return p.pcieEyeErrors }
+
+// Overlaps exposes the sweep overlap counter for registration by the caller.
+func (p *Poller) Overlaps() prometheus.Collector { return p.overlaps }
 
 // Snapshots returns the current immutable snapshot set, or nil before the first
 // device has been collected.
@@ -201,7 +209,9 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 // drainTicks discards the single tick that may have fired while a sweep was
-// running and counts it: it is the sweep that could not start.
+// running and counts it: it is the sweep that could not start. Dropping it
+// rather than sweeping again immediately is the point, so a slow sweep does not
+// chain into back-to-back mlxlink invocations against the firmware.
 //
 // Exactly one tick is taken per sweep. A real ticker coalesces the ticks it
 // missed, so no more than one can ever be pending however long a sweep runs,
@@ -210,7 +220,7 @@ func (p *Poller) Run(ctx context.Context) {
 // since Go 1.23 a ticker channel reports len 0 while a tick is pending.
 //
 // A tick that arrives just as the drain runs can be consumed here instead of
-// starting a sweep, which slips that sweep by one interval and attributes one
+// starting a sweep, which slips that sweep by one interval and counts one
 // overlap that did not happen. Together with coalescing, overlaps are
 // undercounted; the signal is meant for spotting a poll interval that is too
 // short, not exact accounting.
@@ -220,30 +230,12 @@ func (p *Poller) drainTicks(ctx context.Context, t ticker) {
 		if ctx.Err() != nil {
 			return
 		}
-		p.countOverlap()
+		p.overlaps.Inc()
+		// Logged after counting so the record marks a completed accounting.
+		p.logger.Warn("mlxlink sweep did not finish before the next tick",
+			"poll_interval", p.interval.String())
 	default:
 	}
-}
-
-func (p *Poller) countOverlap() {
-	set := p.store.Load()
-	if set == nil {
-		return
-	}
-
-	for _, snapshot := range set.byDevice {
-		p.countError(snapshot.Target, ReasonOverlapping)
-	}
-	if p.showPCIeEye {
-		if pcieSet := p.pcieEyeStore.Load(); pcieSet != nil {
-			for _, snapshot := range pcieSet.byDevice {
-				p.countPCIeEyeError(snapshot.Target, ReasonOverlapping)
-			}
-		}
-	}
-	// Logged after counting so the record marks a completed accounting.
-	p.logger.Warn("mlxlink sweep did not finish before the next tick",
-		"devices", len(set.byDevice), "poll_interval", p.interval.String())
 }
 
 // sweep collects every discovered device once, in order. Discovery is repeated
