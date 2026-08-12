@@ -8,7 +8,12 @@
 # glibc-carrying `base` variant is the smallest base that can actually work.
 FROM gcr.io/distroless/base-debian12:nonroot
 
-COPY mlxlink_exporter /usr/local/bin/mlxlink_exporter
+# One build context serves every platform, so the binaries cannot share a path:
+# GoReleaser files each under `<os>/<arch>/`, and only TARGETPLATFORM says which
+# one this stage is building. Files listed in `extra_files` stay at the context
+# root, which is why LICENSE is copied unprefixed.
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/mlxlink_exporter /usr/local/bin/mlxlink_exporter
 COPY LICENSE /usr/local/share/mlxlink_exporter/LICENSE
 
 EXPOSE 9880

@@ -55,9 +55,10 @@ dockers_v2:
       - linux/arm64
     extra_files:
       - LICENSE
-    # Snapshot builds are for local verification and have no registry
-    # credentials, so the image build is skipped there rather than failing.
-    disable: "{{ .IsSnapshot }}"
+    # Deliberately not disabled on snapshots: GoReleaser already refuses to push
+    # from one, so a snapshot builds the image without publishing it. That makes
+    # `--snapshot` the check that a Dockerfile change still works, which is worth
+    # more than the minutes it adds to a local run.
     # Labels and annotations carry the same data on purpose: ghcr.io links a
     # package to its repository from the image config label, while the manifest
     # annotations are what a multi-platform aware client reads.
