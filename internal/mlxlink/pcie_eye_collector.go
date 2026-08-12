@@ -26,21 +26,26 @@ type PCIeEyeCollector struct {
 	lastSuccess *prometheus.Desc
 }
 
-// NewPCIeEyeCollector returns a collector for the poller's root PCIe Eye cache.
-func NewPCIeEyeCollector(source *Poller, staleAfter time.Duration, logger *slog.Logger) *PCIeEyeCollector {
-	return newPCIeEyeCollector(source, staleAfter, logger, time.Now)
+// PCIeEyeCollectorOption customises a PCIeEyeCollector at construction time.
+type PCIeEyeCollectorOption func(*PCIeEyeCollector)
+
+// WithPCIeEyeNow replaces the clock used to decide staleness. Tests use it to
+// pin the moment a scrape happens.
+func WithPCIeEyeNow(now func() time.Time) PCIeEyeCollectorOption {
+	return func(c *PCIeEyeCollector) { c.now = now }
 }
 
-func newPCIeEyeCollector(
+// NewPCIeEyeCollector returns a collector for the poller's root PCIe Eye cache.
+func NewPCIeEyeCollector(
 	source pcieEyeSnapshotSource,
 	staleAfter time.Duration,
 	logger *slog.Logger,
-	now func() time.Time,
+	opts ...PCIeEyeCollectorOption,
 ) *PCIeEyeCollector {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	c := &PCIeEyeCollector{source: source, staleAfter: staleAfter, now: now, logger: logger}
+	c := &PCIeEyeCollector{source: source, staleAfter: staleAfter, now: time.Now, logger: logger}
 	base := []string{"device", "pci_addr"}
 	c.fom = c.newDesc("mlxlink_pcie_eye_fom",
 		"Vendor-defined root PCIe Eye figure-of-merit score reported by mlxlink.",
@@ -51,6 +56,12 @@ func newPCIeEyeCollector(
 		"Duration of the latest root PCIe Eye collection attempt for this device in seconds.", base)
 	c.lastSuccess = c.newDesc("mlxlink_pcie_eye_collection_last_success_timestamp_seconds",
 		"Unix timestamp of the most recent successful root PCIe Eye collection for this device.", base)
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(c)
+		}
+	}
 	return c
 }
 

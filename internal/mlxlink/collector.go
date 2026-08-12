@@ -70,11 +70,7 @@ type Collector struct {
 
 // NewCollector returns a collector serving the poller's cache. Snapshots older
 // than staleAfter stop being exported. A nil logger falls back to slog.Default.
-func NewCollector(source *Poller, staleAfter time.Duration, logger *slog.Logger, opts ...CollectorOption) *Collector {
-	return newCollector(source, staleAfter, logger, opts...)
-}
-
-func newCollector(source snapshotSource, staleAfter time.Duration, logger *slog.Logger, opts ...CollectorOption) *Collector {
+func NewCollector(source snapshotSource, staleAfter time.Duration, logger *slog.Logger, opts ...CollectorOption) *Collector {
 	if logger == nil {
 		logger = slog.Default()
 	}

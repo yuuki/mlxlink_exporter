@@ -14,8 +14,8 @@ type fakePCIeEyeSnapshotSource struct{ set *snapshotSet[PCIeEyeSnapshot] }
 func (f fakePCIeEyeSnapshotSource) PCIeEyeSnapshots() *snapshotSet[PCIeEyeSnapshot] { return f.set }
 
 func newTestPCIeEyeCollector(set *snapshotSet[PCIeEyeSnapshot], now time.Time) *PCIeEyeCollector {
-	return newPCIeEyeCollector(fakePCIeEyeSnapshotSource{set: set}, collectorStaleAfter,
-		newDiscardLogger(), func() time.Time { return now })
+	return NewPCIeEyeCollector(fakePCIeEyeSnapshotSource{set: set}, collectorStaleAfter,
+		newDiscardLogger(), WithPCIeEyeNow(func() time.Time { return now }))
 }
 
 func TestPCIeEyeCollector_ExportsMetricsAndSelfMonitoring(t *testing.T) {

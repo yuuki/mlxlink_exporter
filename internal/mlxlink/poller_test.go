@@ -307,7 +307,7 @@ func (f *fakeTicker) Stop() {
 func newTestPoller(t *testing.T, d discoverer, r commandRunner, clk *fakeClock) *Poller {
 	t.Helper()
 
-	return newPoller(d, r, testPollInterval, newDiscardLogger(), withClock(clk))
+	return NewPoller(d, r, testPollInterval, newDiscardLogger(), withClock(clk))
 }
 
 func errorCount(t *testing.T, p *Poller, target Target, reason ErrorReason) float64 {
@@ -657,7 +657,7 @@ func TestPoller_ShowEyeUsesEyeCombinedQuery(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -679,7 +679,7 @@ func TestPoller_EyeExitErrorFallsBackToCombined(t *testing.T) {
 	runner := newFakeRunner(mlxlinkFixture(t, "mft-4.34.1-400g-eye.json"))
 	runner.clk, runner.step = clk, 300*time.Millisecond
 	runner.setEyeResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("Eye unsupported")})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -710,7 +710,7 @@ func TestPoller_EyeAndCombinedExitErrorsFallBackToBaseline(t *testing.T) {
 	runner.setEyeResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("Eye unsupported")})
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("combined unsupported")})
 	runner.setBaselineResult(minimalMlxlinkJSON, nil)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -735,7 +735,7 @@ func TestPoller_EyeTimeoutDoesNotFallback(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(nil)
 	runner.setEyeResult(nil, &RunError{Reason: ReasonTimeout, Err: context.DeadlineExceeded})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -753,7 +753,7 @@ func TestPoller_CancellationAfterSuccessfulEyeRunDoesNotPublishOrCount(t *testin
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
 	poller.store.Store(newDeviceSet([]DeviceSnapshot{{
@@ -779,7 +779,7 @@ func TestPoller_CancellationAfterSuccessfulCombinedFallbackDoesNotPublishOrCount
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setEyeResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("Eye unsupported")})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
 	poller.store.Store(newDeviceSet([]DeviceSnapshot{{
@@ -827,7 +827,7 @@ func TestPoller_PCIeEyeRunsAfterAllNetworkQueries(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
@@ -849,7 +849,7 @@ func TestPoller_PCIeEyePartialSweepStaysVisible(t *testing.T) {
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0, targetMlx1}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
@@ -888,7 +888,7 @@ func TestPoller_PCIeEyeFailureDoesNotAffectNetworkSnapshot(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setPCIeEyeResult(mlxlinkFixture(t, "mft-4.34.1-pcie-eye.json"), nil)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
@@ -923,7 +923,7 @@ func TestPoller_CancellationAfterSuccessfulPCIeEyeRunDoesNotPublishOrCount(t *te
 
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 	previousSuccess := clk.Now().Add(-time.Minute)
 	poller.pcieEyeStore.Store(newPCIeEyeSet([]PCIeEyeSnapshot{{
@@ -955,7 +955,7 @@ func TestPoller_CancellationAfterSuccessfulPCIeEyeRunDoesNotPublishOrCount(t *te
 func TestPoller_PCIeEyeErrorsHaveIndependentLabels(t *testing.T) {
 	t.Parallel()
 
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), newFakeRunner(minimalMlxlinkJSON),
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), newFakeRunner(minimalMlxlinkJSON),
 		testPollInterval, newDiscardLogger(), WithShowPCIeEye(true))
 	poller.countPCIeEyeError(targetMlx0, ReasonExitError)
 
@@ -1023,7 +1023,7 @@ func TestPoller_ExitErrorFallsBackToBaseline(t *testing.T) {
 		t.Fatalf("expected combined then baseline, got %v", order)
 	}
 
-	collector := newCollector(fakeSnapshotSource{set: newDeviceSet([]DeviceSnapshot{snapshot})},
+	collector := NewCollector(fakeSnapshotSource{set: newDeviceSet([]DeviceSnapshot{snapshot})},
 		testPollInterval*5, newDiscardLogger(), WithNow(func() time.Time { return clk.Now() }))
 	expected := `
 # HELP mlxlink_collector_up Whether the most recent mlxlink poll for this device succeeded.
@@ -1044,7 +1044,7 @@ func TestPoller_FallbackSuccessDoesNotWarn(t *testing.T) {
 	runner := newFakeRunner(nil)
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult(minimalMlxlinkJSON, nil)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		logger, withClock(clk))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -1065,7 +1065,7 @@ func TestPoller_FallbackFailureWarnsOnce(t *testing.T) {
 	runner := newFakeRunner(nil)
 	runner.setResult(nil, &RunError{Reason: ReasonExitError, Err: errors.New("unsupported query")})
 	runner.setBaselineResult(nil, &RunError{Reason: ReasonTimeout, Err: context.DeadlineExceeded})
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		logger, withClock(clk))
 
 	snapshot, ok := poller.collect(context.Background(), targetMlx0, nil)
@@ -1237,7 +1237,7 @@ func TestPoller_FailureWarningOmitsStderr(t *testing.T) {
 	}
 	runner.setResult(nil, runErr)
 	runner.setBaselineResult(nil, runErr)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		logger, withClock(clk))
 
 	poller.sweep(context.Background())
@@ -1337,7 +1337,7 @@ func TestPoller_OverlappingTickIsCountedAndDropped(t *testing.T) {
 	clk := newFakeClock(2)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	warnings := make(chan string, 8)
-	poller := newPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
 		slog.New(&notifyHandler{records: warnings}), withClock(clk))
 
 	clk.tick(t)

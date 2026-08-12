@@ -150,7 +150,7 @@ func (f fakeSnapshotSource) Snapshots() *snapshotSet[DeviceSnapshot] { return f.
 func newTestCollector(t *testing.T, set *snapshotSet[DeviceSnapshot], now time.Time) *Collector {
 	t.Helper()
 
-	return newCollector(fakeSnapshotSource{set: set}, collectorStaleAfter, newDiscardLogger(),
+	return NewCollector(fakeSnapshotSource{set: set}, collectorStaleAfter, newDiscardLogger(),
 		WithNow(func() time.Time { return now }))
 }
 
@@ -511,7 +511,7 @@ func BenchmarkMlxlinkCollectorCollect(b *testing.B) {
 			LastDuration: 700 * time.Millisecond,
 		})
 	}
-	collector := newCollector(fakeSnapshotSource{set: newDeviceSet(snapshots)},
+	collector := NewCollector(fakeSnapshotSource{set: newDeviceSet(snapshots)},
 		collectorStaleAfter, newDiscardLogger(), WithNow(func() time.Time { return collectorNow }))
 
 	// Large enough that Collect never blocks on the unread channel.
@@ -664,7 +664,7 @@ func TestCollectorWithPoller_ExportsRealOptionalCapture(t *testing.T) {
 
 	poller.sweep(context.Background())
 
-	collector := newCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
+	collector := NewCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
 	tests := []struct {
 		name string
 		want int
@@ -686,11 +686,11 @@ func TestCollectorWithPoller_ExportsRealEyeCapture(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setEyeResult(mlxlinkFixture(t, "mft-4.34.1-400g-eye.json"), nil)
-	poller := newPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowEye(true))
 
 	poller.sweep(context.Background())
-	collector := newCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
+	collector := NewCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
 	for _, tt := range []struct {
 		name string
 		want int
@@ -712,11 +712,12 @@ func TestPCIeEyeCollectorWithPoller_ExportsRealCapture(t *testing.T) {
 	clk := newFakeClock(1)
 	runner := newFakeRunner(minimalMlxlinkJSON)
 	runner.setPCIeEyeResult(mlxlinkFixture(t, "mft-4.34.1-pcie-eye.json"), nil)
-	poller := newPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
+	poller := NewPoller(newFakeDiscoverer([]Target{collectorTarget}), runner, testPollInterval,
 		newDiscardLogger(), withClock(clk), WithShowPCIeEye(true))
 
 	poller.sweep(context.Background())
-	collector := newPCIeEyeCollector(poller, collectorStaleAfter, newDiscardLogger(), clk.Now)
+	collector := NewPCIeEyeCollector(poller, collectorStaleAfter, newDiscardLogger(),
+		WithPCIeEyeNow(clk.Now))
 	if got := testutil.CollectAndCount(collector, "mlxlink_pcie_eye_fom"); got != 32 {
 		t.Fatalf("expected 32 PCIe Eye FOM series from real capture, got %d", got)
 	}
@@ -735,7 +736,7 @@ func TestCollectorWithPoller_ExportsRealCapture(t *testing.T) {
 
 	poller.sweep(context.Background())
 
-	collector := newCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
+	collector := NewCollector(poller, collectorStaleAfter, newDiscardLogger(), WithNow(clk.Now))
 
 	if err := testutil.CollectAndCompare(collector, strings.NewReader(expositionRealCapture),
 		"mlxlink_collector_up",

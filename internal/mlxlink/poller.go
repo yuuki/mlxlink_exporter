@@ -36,8 +36,8 @@ func (r *realTicker) C() <-chan time.Time { return r.t.C }
 func (r *realTicker) Stop() { r.t.Stop() }
 
 // discoverer and commandRunner are the consumer side views of *SysfsDiscovery
-// and *ExecRunner, kept unexported so the package's public surface stays the
-// concrete implementations.
+// and *ExecRunner: the poller needs nothing beyond these calls, and tests
+// substitute fakes for them.
 type discoverer interface {
 	Discover(ctx context.Context) ([]Target, error)
 }
@@ -128,11 +128,7 @@ func WithShowPCIeEye(enabled bool) PollerOption {
 
 // NewPoller returns a poller that collects from discovery through runner every
 // interval. A nil logger falls back to slog.Default.
-func NewPoller(discovery *SysfsDiscovery, runner *ExecRunner, interval time.Duration, logger *slog.Logger, opts ...PollerOption) *Poller {
-	return newPoller(discovery, runner, interval, logger, opts...)
-}
-
-func newPoller(discovery discoverer, runner commandRunner, interval time.Duration, logger *slog.Logger, opts ...PollerOption) *Poller {
+func NewPoller(discovery discoverer, runner commandRunner, interval time.Duration, logger *slog.Logger, opts ...PollerOption) *Poller {
 	if logger == nil {
 		logger = slog.Default()
 	}
