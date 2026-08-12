@@ -19,8 +19,11 @@ import (
 	"github.com/yuuki/mlxlink_exporter/internal/mlxlinkexporter"
 )
 
+// Release builds overwrite both through -ldflags -X. The defaults describe a
+// build made outside GoReleaser rather than naming a release, so that a binary
+// compiled straight from a working tree never claims to be a tagged version.
 var (
-	version = "0.1.0"
+	version = "dev"
 	commit  = "unknown"
 )
 
