@@ -1,0 +1,47 @@
+# GoReleaser configuration for mlxlink_exporter.
+# See https://goreleaser.com/ for documentation.
+version: 2
+project_name: mlxlink_exporter
+
+release:
+  github:
+    owner: yuuki
+    name: mlxlink_exporter
+
+builds:
+  - id: mlxlink_exporter
+    main: .
+    binary: mlxlink_exporter
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .FullCommit }}
+
+archives:
+  - id: tgz
+    ids:
+      - mlxlink_exporter
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+      - deploy/systemd/mlxlink_exporter-root.conf
+      - deploy/systemd/mlxlink_exporter.service
+
+checksum:
+  name_template: "{{ .ProjectName }}_checksums.txt"
+
+changelog:
+  sort: desc
+  use: git
+
