@@ -10,20 +10,19 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
 const (
 	// maxOutputBytes caps mlxlink stdout. A larger response means the binary is
-	// misbehaving, so the process is killed instead of buffered without bound.
+	// misbehaving, so the excess is dropped instead of buffered without bound.
 	maxOutputBytes = 4 << 20
 	// maxStderrBytes caps the stderr excerpt kept for diagnostics.
 	maxStderrBytes = 4 << 10
 )
 
-// errOutputTooLarge is reported instead of the kill error so an overproducing
-// binary fails identically whether it was killed or exited on its own.
+// errOutputTooLarge names the limit so an overproducing binary fails the same
+// way whether it exited on its own or was stopped by the timeout.
 var errOutputTooLarge = fmt.Errorf("mlxlink stdout exceeded %d bytes", maxOutputBytes)
 
 // RunError reports a failed mlxlink invocation. Reason is used as the reason
@@ -100,8 +99,7 @@ func (r *ExecRunner) run(ctx context.Context, device string, queryArgs ...string
 	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	// Cancelling the run context kills the process once it floods stdout.
-	stdout := &limitedBuffer{limit: maxOutputBytes, onExceed: cancel}
+	stdout := &limitedBuffer{limit: maxOutputBytes}
 	stderr := &limitedBuffer{limit: maxStderrBytes}
 
 	args := make([]string, 0, len(queryArgs)+3)
@@ -113,13 +111,9 @@ func (r *ExecRunner) run(ctx context.Context, device string, queryArgs ...string
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Run the child in its own process group and kill the group rather than the
-	// direct child alone: a grandchild that inherited stdout would otherwise
-	// hold the pipe open and keep Wait blocked long past the timeout.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return killProcessGroup(cmd) }
-	// Backstop for a descendant that survives the kill: the pipes are closed
-	// after this delay so a sweep can never stall indefinitely.
+	// The timeout kills the child, but a descendant that inherited stdout would
+	// hold the pipe open and keep Wait blocked. Closing the pipes after this
+	// delay is what still bounds a sweep.
 	cmd.WaitDelay = r.timeout
 
 	err := cmd.Run()
@@ -129,8 +123,7 @@ func (r *ExecRunner) run(ctx context.Context, device string, queryArgs ...string
 		return nil, parentErr
 	}
 	// Checked before success: a process that overproduced and then exited
-	// cleanly must not have its truncated output accepted, and that race is
-	// exactly what the kill signal competes with.
+	// cleanly must not have its truncated output accepted.
 	if stdout.Exceeded() {
 		return nil, r.runError(device, ReasonOutputTooLarge, errOutputTooLarge, stderr.String())
 	}
@@ -145,39 +138,6 @@ func (r *ExecRunner) runError(device string, reason ErrorReason, err error, stde
 	r.logger.Debug("mlxlink invocation failed",
 		"device", device, "reason", reason.String(), "err", err, "stderr", runErr.Stderr)
 	return runErr
-}
-
-// killProcessGroup terminates every process started by the invocation. Killing
-// only the direct child leaves grandchildren holding the stdout pipe, which
-// keeps Wait blocked on EOF.
-//
-// The guarantees are deliberately narrow:
-//
-//   - While the child is unreaped (running or a zombie) its pid is pinned, so
-//     killing the group is safe and takes the grandchildren with it.
-//   - Cancellation can also fire after the child has been reaped, because
-//     os/exec keeps watching the context until the output pipes are drained.
-//     Signalling a raw pid then could hit an unrelated process group, so this
-//     is a no-op instead.
-//   - A grandchild that outlived its already reaped parent is therefore left
-//     running; WaitDelay closing the pipes is what still bounds the caller.
-func killProcessGroup(cmd *exec.Cmd) error {
-	process := cmd.Process
-	if process == nil {
-		return os.ErrProcessDone
-	}
-	// os.Process tracks reap state, so this answers without a syscall once Wait
-	// has completed, and succeeds for a zombie. The few instructions between
-	// this probe and the kill would need a reap plus a full pid wraparound plus
-	// a new group leader to matter.
-	if err := process.Signal(syscall.Signal(0)); err != nil {
-		return os.ErrProcessDone
-	}
-	// With Setpgid the child leads a group whose id equals its pid.
-	if err := syscall.Kill(-process.Pid, syscall.SIGKILL); err != nil {
-		return process.Kill()
-	}
-	return nil
 }
 
 // classifyRunError maps an invocation failure to its reason label. The run
@@ -207,10 +167,9 @@ func classifyRunError(runCtx context.Context, err error) ErrorReason {
 
 // limitedBuffer keeps at most limit bytes and drops the rest. Writes never
 // fail: reporting an error to os/exec would mask the underlying failure, so
-// overproduction is signalled through onExceed (fired once) instead.
+// overproduction is recorded in Exceeded and acted on after the run instead.
 type limitedBuffer struct {
 	limit    int
-	onExceed func()
 	buf      bytes.Buffer
 	exceeded bool
 }
@@ -224,12 +183,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 		b.buf.Write(p[:remaining])
 	}
 
-	if !b.exceeded {
-		b.exceeded = true
-		if b.onExceed != nil {
-			b.onExceed()
-		}
-	}
+	b.exceeded = true
 	return len(p), nil
 }
 
