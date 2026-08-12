@@ -17,6 +17,26 @@ The default listen address is `:9880`.
 - Read access to `/sys/class/infiniband` for device discovery.
 - Verified against MFT 4.34.1 output from one ConnectX-7 system. Decoder tests use captured baseline, FEC/SerDes, network Eye and root-PCIe Eye responses under `internal/mlxlink/testdata/mlxlink/`. The serial number in the Eye capture is redacted. Other MFT releases and adapter families are not yet qualified.
 
+### Install
+Release archives carry the binary, this README, the LICENSE and the systemd assets for `linux/amd64` and `linux/arm64`. Verify the download against `mlxlink_exporter_checksums.txt` from the same release.
+
+```bash
+VERSION=0.1.0
+curl -fsSLO https://github.com/yuuki/mlxlink_exporter/releases/download/v${VERSION}/mlxlink_exporter_${VERSION}_linux_amd64.tar.gz
+tar xzf mlxlink_exporter_${VERSION}_linux_amd64.tar.gz
+sudo install -Dm0755 mlxlink_exporter /usr/local/bin/mlxlink_exporter
+```
+
+See [docs/deployment.md](docs/deployment.md) for the full systemd procedure, including the privilege escalation order.
+
+A multi-platform image is published to `ghcr.io/yuuki/mlxlink_exporter`:
+
+```bash
+docker pull ghcr.io/yuuki/mlxlink_exporter:v0.1.0
+```
+
+The image contains the exporter only. It cannot collect anything on its own, because `mlxlink` belongs to MFT on the host: the container needs `/sys/class/infiniband` and the MFT installation mounted in, plus whatever firmware-access privilege the host requires. Container deployment has not been qualified on real hardware; the systemd unit in `deploy/systemd/` is the supported path, and the image is offered as a distribution convenience for operators who already run their exporters this way.
+
 ### Build and run
 ```bash
 make build   # compiles ./mlxlink_exporter

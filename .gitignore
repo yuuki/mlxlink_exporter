@@ -1,4 +1,5 @@
 /mlxlink_exporter
+/dist/
 .gocache/
 .gomodcache/
 

@@ -38,6 +38,46 @@ archives:
       - deploy/systemd/mlxlink_exporter-root.conf
       - deploy/systemd/mlxlink_exporter.service
 
+# `dockers_v2` rather than `dockers` + `docker_manifests`: the latter pair is
+# deprecated, and it would need one entry per architecture plus a manifest
+# stitching them back together to express what `platforms` states directly.
+dockers_v2:
+  - id: mlxlink_exporter
+    ids:
+      - mlxlink_exporter
+    images:
+      - ghcr.io/yuuki/mlxlink_exporter
+    tags:
+      - "v{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    extra_files:
+      - LICENSE
+    # Snapshot builds are for local verification and have no registry
+    # credentials, so the image build is skipped there rather than failing.
+    disable: "{{ .IsSnapshot }}"
+    # Labels and annotations carry the same data on purpose: ghcr.io links a
+    # package to its repository from the image config label, while the manifest
+    # annotations are what a multi-platform aware client reads.
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "Prometheus exporter for NVIDIA mlxlink physical link and optical module telemetry"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.licenses: "MIT"
+    annotations:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "Prometheus exporter for NVIDIA mlxlink physical link and optical module telemetry"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.licenses: "MIT"
+
 checksum:
   name_template: "{{ .ProjectName }}_checksums.txt"
 
