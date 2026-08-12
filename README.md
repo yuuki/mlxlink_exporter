@@ -145,7 +145,7 @@ A value that `mlxlink` reports as `N/A` produces no sample at all rather than a 
 - **PCIe Eye failures are isolated.** Root-PCIe Eye collection runs after all network collection, has no fallback, and never changes network snapshots, readiness or `mlxlink_collector_up`. A failure sets its own `up` metric to `0` and retains the previous PCIe Eye values until they become stale.
 - **Stale data is suppressed.** If a device has not been collected successfully for longer than `--poll-interval` × 5 (150 s by default), its measurement series stop being exported while the self-monitoring series continue. This is what distinguishes "the link is fine" from "we stopped being able to ask".
 - **Overlap accounting is approximate.** If a sweep takes longer than `--poll-interval`, the tick that could not start a sweep is dropped and counted in `mlxlink_sweep_overlaps_total`. Go tickers coalesce missed ticks, so a sweep that overruns several intervals is still counted once: use the metric to detect that the interval is too short, not to count exactly how many sweeps were lost.
-- **Containers are not supported.** `mlxlink` is part of MFT and talks to the adapter firmware, so it is deliberately absent from the published container images (this project builds no container image). Run `mlxlink_exporter` on the host.
+- **The container image carries no MFT.** `mlxlink` belongs to MFT and talks to the adapter firmware, so it is deliberately absent from `ghcr.io/yuuki/mlxlink_exporter`: the image holds the exporter alone and collects nothing until `/sys/class/infiniband`, the MFT installation and the firmware-access privilege the host requires are all provided to the container. That arrangement is unqualified on real hardware; running on the host under the systemd unit in `deploy/systemd/` is the supported path.
 - **Multi-port adapters.** `mlxlink` is invoked once per device without `-p`, so only the lowest port number of a device is collected.
 - **A host with no RDMA devices** stays at `503` on `/readyz` forever, by design: there is nothing to collect. `/healthz` remains `200`.
 - **Eye telemetry is opt-in and narrowly qualified.** Both Eye flags default to `false`. Network combined Eye took 0.83 s and the separate PCIe Eye query took 0.33 s in single measurements on MFT 4.34.1/ConnectX-7. These are not multi-run latency guarantees, and other MFT releases, adapter families, cables, line rates and link states remain unverified.
@@ -197,7 +197,7 @@ GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go test ./...
 ## Deployment
 
 - A systemd unit file and an opt-in root override are available under `deploy/systemd/`; see [docs/deployment.md](docs/deployment.md).
-- Container deployment is intentionally unsupported because MFT's `mlxlink` accesses adapter firmware.
+- The published container image ships the exporter without MFT, so it is a distribution convenience rather than a qualified deployment; see the operational note above.
 
 ## Development Notes
 

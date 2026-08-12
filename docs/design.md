@@ -29,7 +29,7 @@ Goals: expose physical-layer health without ever letting a scrape wait on firmwa
 - **Dependencies**: `mlxlink` from NVIDIA MFT, verified against MFT 4.34.1 on one ConnectX-7 system. Devices are addressed by IB device name (`-d mlx5_0`), so `/dev/mst` nodes are not required.
 - **Service interface**: `/metrics`, `/healthz` (liveness, always `200`), `/readyz` (`503` until one device has been collected). Default listen address `:9880`.
 - **Configurability**: thirteen flags. The twelve that configure the service are mirrored by `MLXLINK_EXPORTER_*` environment variables; `--version` is CLI only. Both Eye flags default to false.
-- **Non-goals**: container images (see §7), active device configuration, and per-port collection on multi-port adapters (see §7).
+- **Non-goals**: shipping MFT inside the container image (see §7), active device configuration, and per-port collection on multi-port adapters (see §7).
 
 ## 3. High-Level Architecture
 
@@ -170,7 +170,7 @@ A dropped tick is not part of this taxonomy. It is a property of the sweep rathe
 - **Hosts without RDMA devices** never become ready: `/readyz` stays `503` for the lifetime of the process. This is deliberate — there is nothing to serve — but it means readiness cannot be used as a generic liveness signal. `/healthz` is the one for that.
 - **MFT version drift**: key spellings differ between MFT releases. `fieldAliases` holds the one spelling observed for each base field and section name, so a renamed key is corrected there; should a capture ever require two spellings of the same field to be accepted at once, that table is where the choice belongs. For FEC, SerDes or Eye structural changes, update the dedicated parser's schema rules or parameter allowlist. In both cases add a real fixture rather than branching on versions.
 - **Eye qualification is narrow**: both Eye flags default to false. Network combined Eye took 0.83 s and root-PCIe Eye took 0.33 s in single measurements on MFT 4.34.1 with one ConnectX-7. No latency guarantee or output compatibility is claimed for other MFT releases, adapters, cables, line rates or link states. PCIe collection addresses only the root link selected by the default depth/index/node.
-- **No container image**: `mlxlink` belongs to MFT and talks to the adapter firmware. Bundling MFT into the image would mean shipping vendor tooling with kernel-adjacent access, so this project deliberately ships no container image and runs on the host.
+- **The container image is exporter-only**: a multi-platform image is published to `ghcr.io/yuuki/mlxlink_exporter`, but `mlxlink` belongs to MFT and talks to the adapter firmware, and bundling MFT would mean shipping vendor tooling with kernel-adjacent access. The image therefore contains the exporter alone and collects nothing until the host's `/sys/class/infiniband`, its MFT installation and the required firmware-access privilege are all given to the container. That arrangement has not been qualified on real hardware, so the host deployment in `deploy/systemd/` remains the supported path and the image is a distribution convenience.
 
 ## 8. Security Considerations
 

@@ -1,6 +1,6 @@
 # Deployment
 
-`mlxlink_exporter` runs on the host. NVIDIA MFT's `mlxlink` accesses adapter firmware, so container deployment is deliberately unsupported.
+This document covers the supported deployment: `mlxlink_exporter` running on the host under systemd. NVIDIA MFT's `mlxlink` accesses adapter firmware and is deliberately absent from the published container image, so a container deployment additionally has to supply MFT, `/sys/class/infiniband` and the firmware-access privilege itself, and has not been qualified on real hardware.
 
 ## Prerequisites
 
