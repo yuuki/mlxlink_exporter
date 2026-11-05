@@ -1,6 +1,7 @@
 package mlxlink
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -672,6 +673,20 @@ func TestDecode_FECHistogramInvalidSectionIsEmpty(t *testing.T) {
 			section: `"Header":{"values":["Range","Occurrences"]},
 				"Bin 0":{"values":["[0]"]}`,
 		},
+		{
+			name: "duplicate bin number",
+			section: `"Header":{"values":["Range","Occurrences"]},
+				"Bin 0":{"values":["[0]","1"]},
+				"Bin 00":{"values":["[0]","2"]}`,
+		},
+		{
+			name:    "header without bins",
+			section: `"Header":{"values":["Range","Occurrences"]}`,
+		},
+		{
+			name:    "missing header",
+			section: `"Bin 0":{"values":["[0]","1"]}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -785,6 +800,26 @@ func TestDecode_SerDesTXInvalidSectionIsEmpty(t *testing.T) {
 			section: `"Serdes TX parameters":{"values":["fir_pre1"]},
 				"Lane future":{"values":["1"]}`,
 		},
+		{
+			name: "duplicate lane number",
+			section: `"Serdes TX parameters":{"values":["fir_pre1"]},
+				"Lane 1":{"values":["1"]},
+				"Lane 01":{"values":["2"]}`,
+		},
+		{
+			name: "duplicate header after trimming",
+			section: `"Serdes TX parameters":{"values":["fir_pre1"," fir_pre1 "]},
+				"Lane 0":{"values":["1","2"]}`,
+		},
+		{
+			name:    "missing header",
+			section: `"Lane 0":{"values":["1"]}`,
+		},
+		{
+			name: "empty header",
+			section: `"Serdes TX parameters":{"values":[]},
+				"Lane 0":{"values":[]}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -870,6 +905,58 @@ func TestDecode_SerDesTXBadLaneIsOmitted(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.SerDesTX, want) {
 		t.Fatalf("unexpected SerDes data\n got: %+v\nwant: %+v", got.SerDesTX, want)
+	}
+}
+
+// Pins the space trimming of the structural parsers, which no real capture
+// exercises: SerDes parameter names, Eye lane numbers and every value (FEC
+// ranges and counts, SerDes values, Eye scores) may carry surrounding space.
+// The FEC header and the "Bin N" and "Lane N" keys are matched exactly.
+func TestDecode_StructuralValuesTolerateSurroundingSpace(t *testing.T) {
+	t.Parallel()
+
+	raw := optionalDocument(`
+		"Histogram of FEC Errors":{
+			"Header":{"values":["Range","Occurrences"]},
+			"Bin 0":{"values":[" [ 0 : 3 ] "," 7 "]}
+		},
+		"Serdes Tuning Transmitter Info":{
+			"Serdes TX parameters":{"values":[" fir_main ","drv_amp "]},
+			"Lane 0":{"values":[" 43 "," 8 "]}
+		},
+		"EYE Opening Info":{
+			"Lane":{"values":[" 2 ","0"]},
+			"Initial FOM":{"values":[" 12 ","10"]},
+			"Last FOM":{"values":["22"," 20 "]},
+			"Upper Grades":{"values":["32","30"]},
+			"Mid Grades":{"values":["42","40"]},
+			"Lower Grades":{"values":["52","50"]}
+		}`)
+	got, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode returned error: %v", err)
+	}
+
+	wantFEC := []FECHistogramBin{{Bin: 0, ErrorCountMin: 0, ErrorCountMax: 3, Occurrences: 7}}
+	if !reflect.DeepEqual(got.FECHistogram, wantFEC) {
+		t.Fatalf("unexpected FEC histogram\n got: %+v\nwant: %+v", got.FECHistogram, wantFEC)
+	}
+	wantSerDes := SerDesTX{
+		FIRCoefficients: []SerDesFIRCoefficient{{Lane: 0, Tap: "main", Value: 43}},
+		DriveAmplitude:  []LaneValue{{Lane: 0, Value: 8}},
+	}
+	if !reflect.DeepEqual(got.SerDesTX, wantSerDes) {
+		t.Fatalf("unexpected SerDes data\n got: %+v\nwant: %+v", got.SerDesTX, wantSerDes)
+	}
+	wantEye := Eye{
+		InitialFOM: []LaneValue{{Lane: 0, Value: 10}, {Lane: 2, Value: 12}},
+		LastFOM:    []LaneValue{{Lane: 0, Value: 20}, {Lane: 2, Value: 22}},
+		UpperGrade: []LaneValue{{Lane: 0, Value: 30}, {Lane: 2, Value: 32}},
+		MidGrade:   []LaneValue{{Lane: 0, Value: 40}, {Lane: 2, Value: 42}},
+		LowerGrade: []LaneValue{{Lane: 0, Value: 50}, {Lane: 2, Value: 52}},
+	}
+	if !reflect.DeepEqual(got.Eye, wantEye) {
+		t.Fatalf("unexpected Eye data\n got: %+v\nwant: %+v", got.Eye, wantEye)
 	}
 }
 
@@ -1083,6 +1170,19 @@ func TestDecode_EyeInvalidStructureOmitsFamily(t *testing.T) {
 				"Upper Grades":{"values":["3"]},"Mid Grades":{"values":["4"]},
 				"Lower Grades":{"values":["5"]}`,
 		},
+		{
+			name: "missing lane list",
+			fields: `"Initial FOM":{"values":["1"]},"Last FOM":{"values":["2"]},
+				"Upper Grades":{"values":["3"]},"Mid Grades":{"values":["4"]},
+				"Lower Grades":{"values":["5"]}`,
+		},
+		{
+			name: "empty lane list",
+			fields: `"Lane":{"values":[]},
+				"Initial FOM":{"values":[]},"Last FOM":{"values":[]},
+				"Upper Grades":{"values":[]},"Mid Grades":{"values":[]},
+				"Lower Grades":{"values":[]}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1207,5 +1307,46 @@ func TestDecodePCIeEye_EnvelopeValidation(t *testing.T) {
 				t.Fatalf("expected empty data on error, got %+v", got)
 			}
 		})
+	}
+}
+
+func sectionFromJSON(t *testing.T, raw string) section {
+	t.Helper()
+	var sec section
+	if err := json.Unmarshal([]byte(raw), &sec); err != nil {
+		t.Fatalf("decode test section: %v", err)
+	}
+	return sec
+}
+
+// The Decode-level cases for an empty SerDes header and an empty Eye lane list
+// cannot see the guards that reject them: without lanes, the decoded families
+// are empty whether or not the section is accepted.
+func TestSerDesHeader_EmptyHeaderIsRejected(t *testing.T) {
+	t.Parallel()
+
+	if parameters, ok := serDesHeader(sectionFromJSON(t,
+		`{"Serdes TX parameters":{"values":[]}}`)); ok {
+		t.Fatalf("expected an empty header to be rejected, got %q", parameters)
+	}
+	parameters, ok := serDesHeader(sectionFromJSON(t, `{"Serdes TX parameters":{"values":[" fir_main "]}}`))
+	if !ok || !reflect.DeepEqual(parameters, []string{"fir_main"}) {
+		t.Fatalf("expected a one-parameter header to be accepted, got %q, %v", parameters, ok)
+	}
+}
+
+func TestDecodeEyeLaneValues_EmptyLaneListIsRejected(t *testing.T) {
+	t.Parallel()
+
+	if values, ok := decodeEyeLaneValues(sectionFromJSON(t,
+		`{"Lane":{"values":[]},"Initial FOM":{"values":[]},"Last FOM":{"values":[]}}`),
+		"Initial FOM", "Last FOM"); ok {
+		t.Fatalf("expected an empty lane list to be rejected, got %+v", values)
+	}
+	values, ok := decodeEyeLaneValues(sectionFromJSON(t,
+		`{"Lane":{"values":["0"]},"Initial FOM":{"values":["1"]},"Last FOM":{"values":["2"]}}`),
+		"Initial FOM", "Last FOM")
+	if want := [][]LaneValue{{{Lane: 0, Value: 1}}, {{Lane: 0, Value: 2}}}; !ok || !reflect.DeepEqual(values, want) {
+		t.Fatalf("expected a one-lane section to be accepted, got %+v, %v", values, ok)
 	}
 }

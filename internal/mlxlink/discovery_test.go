@@ -269,3 +269,58 @@ func TestSysfsDiscovery_ContextCanceled(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
+
+func TestSysfsDiscovery_ClassPathIsRegularFile(t *testing.T) {
+	t.Parallel()
+
+	// A class path that exists but is not a directory is a real error, unlike
+	// a missing one; a file is used because root ignores permission bits.
+	root := t.TempDir()
+	classDir := filepath.Join(root, classInfinibandPath)
+	if err := os.MkdirAll(filepath.Dir(classDir), 0o755); err != nil {
+		t.Fatalf("create class parent: %v", err)
+	}
+	if err := os.WriteFile(classDir, nil, 0o644); err != nil {
+		t.Fatalf("create class file: %v", err)
+	}
+
+	discovery := NewSysfsDiscovery(root, nil, newDiscardLogger())
+	targets, err := discovery.Discover(context.Background())
+	if err == nil {
+		t.Fatalf("expected an error for a class path that is a regular file, got targets %v", targets)
+	}
+	if targets != nil {
+		t.Fatalf("expected nil targets on error, got %v", targets)
+	}
+}
+
+// cancelAfterContext returns nil from its first remaining Err calls and
+// context.Canceled from then on, so a test can cancel a discovery after it has
+// read the class directory.
+type cancelAfterContext struct {
+	context.Context
+	remaining int
+}
+
+func (c *cancelAfterContext) Err() error {
+	if c.remaining > 0 {
+		c.remaining--
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestSysfsDiscovery_ContextCanceledDuringWalk(t *testing.T) {
+	t.Parallel()
+
+	ctx := &cancelAfterContext{Context: context.Background(), remaining: 1}
+	discovery := NewSysfsDiscovery(fixtureRoot("basic"), nil, newDiscardLogger())
+
+	targets, err := discovery.Discover(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if targets != nil {
+		t.Fatalf("expected no partial targets, got %v", targets)
+	}
+}
