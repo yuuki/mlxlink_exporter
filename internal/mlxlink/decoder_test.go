@@ -1,6 +1,7 @@
 package mlxlink
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -908,7 +909,9 @@ func TestDecode_SerDesTXBadLaneIsOmitted(t *testing.T) {
 }
 
 // Pins the space trimming of the structural parsers, which no real capture
-// exercises: padded headers, lane numbers and values still decode.
+// exercises: SerDes parameter names, Eye lane numbers and every value (FEC
+// ranges and counts, SerDes values, Eye scores) may carry surrounding space.
+// The FEC header and the "Bin N" and "Lane N" keys are matched exactly.
 func TestDecode_StructuralValuesTolerateSurroundingSpace(t *testing.T) {
 	t.Parallel()
 
@@ -1304,5 +1307,46 @@ func TestDecodePCIeEye_EnvelopeValidation(t *testing.T) {
 				t.Fatalf("expected empty data on error, got %+v", got)
 			}
 		})
+	}
+}
+
+func sectionFromJSON(t *testing.T, raw string) section {
+	t.Helper()
+	var sec section
+	if err := json.Unmarshal([]byte(raw), &sec); err != nil {
+		t.Fatalf("decode test section: %v", err)
+	}
+	return sec
+}
+
+// The Decode-level cases for an empty SerDes header and an empty Eye lane list
+// cannot see the guards that reject them: without lanes, the decoded families
+// are empty whether or not the section is accepted.
+func TestSerDesHeader_EmptyHeaderIsRejected(t *testing.T) {
+	t.Parallel()
+
+	if parameters, ok := serDesHeader(sectionFromJSON(t,
+		`{"Serdes TX parameters":{"values":[]}}`)); ok {
+		t.Fatalf("expected an empty header to be rejected, got %q", parameters)
+	}
+	parameters, ok := serDesHeader(sectionFromJSON(t, `{"Serdes TX parameters":{"values":[" fir_main "]}}`))
+	if !ok || !reflect.DeepEqual(parameters, []string{"fir_main"}) {
+		t.Fatalf("expected a one-parameter header to be accepted, got %q, %v", parameters, ok)
+	}
+}
+
+func TestDecodeEyeLaneValues_EmptyLaneListIsRejected(t *testing.T) {
+	t.Parallel()
+
+	if values, ok := decodeEyeLaneValues(sectionFromJSON(t,
+		`{"Lane":{"values":[]},"Initial FOM":{"values":[]},"Last FOM":{"values":[]}}`),
+		"Initial FOM", "Last FOM"); ok {
+		t.Fatalf("expected an empty lane list to be rejected, got %+v", values)
+	}
+	values, ok := decodeEyeLaneValues(sectionFromJSON(t,
+		`{"Lane":{"values":["0"]},"Initial FOM":{"values":["1"]},"Last FOM":{"values":["2"]}}`),
+		"Initial FOM", "Last FOM")
+	if want := [][]LaneValue{{{Lane: 0, Value: 1}}, {{Lane: 0, Value: 2}}}; !ok || !reflect.DeepEqual(values, want) {
+		t.Fatalf("expected a one-lane section to be accepted, got %+v, %v", values, ok)
 	}
 }

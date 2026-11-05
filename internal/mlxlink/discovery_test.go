@@ -270,7 +270,7 @@ func TestSysfsDiscovery_ContextCanceled(t *testing.T) {
 	}
 }
 
-func TestSysfsDiscovery_UnreadableClassDirectory(t *testing.T) {
+func TestSysfsDiscovery_ClassPathIsRegularFile(t *testing.T) {
 	t.Parallel()
 
 	// A class path that exists but is not a directory is a real error, unlike
@@ -287,15 +287,16 @@ func TestSysfsDiscovery_UnreadableClassDirectory(t *testing.T) {
 	discovery := NewSysfsDiscovery(root, nil, newDiscardLogger())
 	targets, err := discovery.Discover(context.Background())
 	if err == nil {
-		t.Fatalf("expected an error for an unreadable class directory, got targets %v", targets)
+		t.Fatalf("expected an error for a class path that is a regular file, got targets %v", targets)
 	}
 	if targets != nil {
 		t.Fatalf("expected nil targets on error, got %v", targets)
 	}
 }
 
-// cancelAfterContext reports cancellation from its n-th Err call onwards, so a
-// test can cancel a discovery after it has read the class directory.
+// cancelAfterContext returns nil from its first remaining Err calls and
+// context.Canceled from then on, so a test can cancel a discovery after it has
+// read the class directory.
 type cancelAfterContext struct {
 	context.Context
 	remaining int
