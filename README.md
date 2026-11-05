@@ -194,6 +194,17 @@ GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go test ./...
 
 `internal/mlxlink/testdata/sysfs` contains fixture trees used in unit tests to emulate sysfs layouts.
 
+### Code Complexity
+
+CI measures Cognitive and Cyclomatic Complexity with
+[cccc](https://github.com/moznion/cccc) on pull requests and pushes to `main`
+and writes the totals and the 20 most complex functions to the job summary
+(`.github/workflows/complexity.yml`). It only reports; no complexity
+threshold fails the build. `cccc.toml` sets what is analyzed: tests, generated
+code and vendored sources are excluded. To see the same ranking locally,
+install cccc (a [release binary](https://github.com/moznion/cccc/releases) or
+`cargo install cccc-cli`) and run `make complexity`.
+
 ## Deployment
 
 - A systemd unit file and an opt-in root override are available under `deploy/systemd/`; see [docs/deployment.md](docs/deployment.md).

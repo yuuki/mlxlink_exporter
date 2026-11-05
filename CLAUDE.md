@@ -10,6 +10,7 @@ Prometheus exporter for NVIDIA MFT's `mlxlink`. `docs/design.md` is the source o
 make build          # go build -o mlxlink_exporter .
 make lint           # go vet ./...
 make fmt            # gofmt -w over all .go files
+make complexity     # cccc complexity ranking (needs cccc; settings in cccc.toml)
 go test -race ./... # what CI runs; -race is required, these tests are concurrency-heavy
 go test -race ./internal/mlxlink -run TestPoller_PartialSweepStaysVisible  # single test
 goreleaser check    # release config; CI validates it on every push
