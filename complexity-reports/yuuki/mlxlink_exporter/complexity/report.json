@@ -1,9 +1,9 @@
 {
   "repository": "yuuki/mlxlink_exporter/complexity",
   "ref": "refs/heads/main",
-  "commit": "21f451b7c9b1a08bb9333c54b27cba42aaecb583",
+  "commit": "47ef0fae46b7d8e66c50ebb644cab518c8f97696",
   "base_ref": "refs/heads/main",
-  "timestamp": "2026-11-05T13:08:26.583296583Z",
+  "timestamp": "2026-11-05T13:51:17.866874849Z",
   "custom_metrics": [
     {
       "key": "code_complexity",
