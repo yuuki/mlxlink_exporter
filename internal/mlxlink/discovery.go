@@ -83,40 +83,44 @@ func (d *SysfsDiscovery) Discover(ctx context.Context) ([]Target, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-
-		name := entry.Name()
-		if d.exclude[name] {
-			continue
+		if target, ok := d.targetFor(classDir, entry); ok {
+			targets = append(targets, target)
 		}
-		if !isDeviceDir(classDir, entry) {
-			continue
-		}
-
-		devicePath := filepath.Join(classDir, name, deviceLinkName)
-		pciAddr, isVF := readPCIInfo(devicePath)
-		if isVF {
-			d.logger.Debug("skipping SR-IOV virtual function", "device", name, "pci_addr", pciAddr)
-			continue
-		}
-
-		port, count := lowestPort(filepath.Join(classDir, name, portsDirName))
-		if count == 0 {
-			d.logger.Warn("skipping device without ports", "device", name, "pci_addr", pciAddr)
-			continue
-		}
-		if count > 1 {
-			d.warnMultiPort(name, port, count)
-		}
-
-		portDir := filepath.Join(classDir, name, portsDirName, strconv.Itoa(port))
-		targets = append(targets, Target{
-			Device:  name,
-			Port:    strconv.Itoa(port),
-			PCIAddr: pciAddr,
-			NetDev:  readPortNetDev(portDir),
-		})
 	}
 	return targets, nil
+}
+
+// targetFor turns one class entry into a target, reporting false for an entry
+// that is not collected.
+func (d *SysfsDiscovery) targetFor(classDir string, entry fs.DirEntry) (Target, bool) {
+	name := entry.Name()
+	if d.exclude[name] || !isDeviceDir(classDir, entry) {
+		return Target{}, false
+	}
+
+	devicePath := filepath.Join(classDir, name, deviceLinkName)
+	pciAddr, isVF := readPCIInfo(devicePath)
+	if isVF {
+		d.logger.Debug("skipping SR-IOV virtual function", "device", name, "pci_addr", pciAddr)
+		return Target{}, false
+	}
+
+	port, count := lowestPort(filepath.Join(classDir, name, portsDirName))
+	if count == 0 {
+		d.logger.Warn("skipping device without ports", "device", name, "pci_addr", pciAddr)
+		return Target{}, false
+	}
+	if count > 1 {
+		d.warnMultiPort(name, port, count)
+	}
+
+	portDir := filepath.Join(classDir, name, portsDirName, strconv.Itoa(port))
+	return Target{
+		Device:  name,
+		Port:    strconv.Itoa(port),
+		PCIAddr: pciAddr,
+		NetDev:  readPortNetDev(portDir),
+	}, true
 }
 
 // warnMultiPort reports the single-port limitation once per device: mlxlink is

@@ -243,14 +243,46 @@ func decodeEyeLaneValues(sec section, fields ...string) ([][]LaneValue, bool) {
 	if !ok || len(rawLanes) == 0 {
 		return nil, false
 	}
-	rawFamilies := make([][]string, len(fields))
-	for i, field := range fields {
-		rawFamilies[i], ok = rawValues(sec[field])
-		if !ok || len(rawFamilies[i]) != len(rawLanes) {
-			return nil, false
-		}
+	rawFamilies, ok := eyeFamilies(sec, fields, len(rawLanes))
+	if !ok {
+		return nil, false
+	}
+	lanes, ok := uniqueEyeLanes(rawLanes)
+	if !ok {
+		return nil, false
 	}
 
+	decoded := make([][]LaneValue, len(fields))
+	for i, lane := range lanes {
+		laneValues, ok := eyeLaneScores(rawFamilies, i)
+		if !ok {
+			continue
+		}
+		for family, value := range laneValues {
+			decoded[family] = append(decoded[family], LaneValue{Lane: lane, Value: value})
+		}
+	}
+	for _, family := range decoded {
+		sort.Slice(family, func(i, j int) bool { return family[i].Lane < family[j].Lane })
+	}
+	return decoded, true
+}
+
+func eyeFamilies(sec section, fields []string, laneCount int) ([][]string, bool) {
+	families := make([][]string, len(fields))
+	for i, field := range fields {
+		values, ok := rawValues(sec[field])
+		if !ok || len(values) != laneCount {
+			return nil, false
+		}
+		families[i] = values
+	}
+	return families, true
+}
+
+// uniqueEyeLanes parses the explicit lane numbers. A repeated number would
+// export two series for one lane, so it invalidates the list.
+func uniqueEyeLanes(rawLanes []string) ([]int, bool) {
 	lanes := make([]int, len(rawLanes))
 	seen := make(map[int]struct{}, len(rawLanes))
 	for i, rawLane := range rawLanes {
@@ -264,30 +296,31 @@ func decodeEyeLaneValues(sec section, fields ...string) ([][]LaneValue, bool) {
 		seen[lane] = struct{}{}
 		lanes[i] = lane
 	}
+	return lanes, true
+}
 
-	decoded := make([][]LaneValue, len(fields))
-	for i, lane := range lanes {
-		laneValues := make([]float64, len(fields))
-		validLane := true
-		for family, rawFamily := range rawFamilies {
-			value, err := strconv.ParseFloat(strings.TrimSpace(rawFamily[i]), 64)
-			if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
-				validLane = false
-				break
-			}
-			laneValues[family] = value
+// eyeLaneScores reads one lane's score in every family, or none of them: a lane
+// missing from only some families would leave them disagreeing on its lanes.
+func eyeLaneScores(families [][]string, index int) ([]float64, bool) {
+	scores := make([]float64, len(families))
+	for family, values := range families {
+		score, ok := parseFiniteFloat(values[index])
+		if !ok {
+			return nil, false
 		}
-		if !validLane {
-			continue
-		}
-		for family, value := range laneValues {
-			decoded[family] = append(decoded[family], LaneValue{Lane: lane, Value: value})
-		}
+		scores[family] = score
 	}
-	for _, family := range decoded {
-		sort.Slice(family, func(i, j int) bool { return family[i].Lane < family[j].Lane })
+	return scores, true
+}
+
+// parseFiniteFloat reads a number from a structural section, which carries
+// plain numbers without the range suffix of a measured scalar.
+func parseFiniteFloat(raw string) (float64, bool) {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
+		return 0, false
 	}
-	return decoded, true
+	return value, true
 }
 
 func decodeFECHistogram(sec section) []FECHistogramBin {
@@ -295,8 +328,7 @@ func decodeFECHistogram(sec section) []FECHistogramBin {
 		return nil
 	}
 
-	header, ok := rawValues(sec["Header"])
-	if !ok || len(header) != 2 || header[0] != "Range" || header[1] != "Occurrences" {
+	if !hasFECHeader(sec) {
 		return nil
 	}
 
@@ -306,34 +338,52 @@ func decodeFECHistogram(sec section) []FECHistogramBin {
 			continue
 		}
 
-		bin, ok := parseNonnegativeInt(strings.TrimPrefix(key, "Bin "))
+		bin, ok := parseFECBin(strings.TrimPrefix(key, "Bin "), raw)
 		if !ok {
 			return nil
 		}
-		if _, duplicate := binsByNumber[bin]; duplicate {
+		if _, duplicate := binsByNumber[bin.Bin]; duplicate {
 			return nil
 		}
-
-		values, ok := rawValues(raw)
-		if !ok || len(values) != 2 {
-			return nil
-		}
-		minimum, maximum, ok := parseFECRange(values[0])
-		if !ok {
-			return nil
-		}
-		occurrences, err := strconv.ParseUint(strings.TrimSpace(values[1]), 10, 64)
-		if err != nil {
-			return nil
-		}
-		binsByNumber[bin] = FECHistogramBin{
-			Bin:           bin,
-			ErrorCountMin: minimum,
-			ErrorCountMax: maximum,
-			Occurrences:   occurrences,
-		}
+		binsByNumber[bin.Bin] = bin
 	}
+	return consecutiveFECBins(binsByNumber)
+}
 
+func hasFECHeader(sec section) bool {
+	header, ok := rawValues(sec["Header"])
+	return ok && len(header) == 2 && header[0] == "Range" && header[1] == "Occurrences"
+}
+
+func parseFECBin(number string, raw json.RawMessage) (FECHistogramBin, bool) {
+	bin, ok := parseNonnegativeInt(number)
+	if !ok {
+		return FECHistogramBin{}, false
+	}
+	values, ok := rawValues(raw)
+	if !ok || len(values) != 2 {
+		return FECHistogramBin{}, false
+	}
+	minimum, maximum, ok := parseFECRange(values[0])
+	if !ok {
+		return FECHistogramBin{}, false
+	}
+	occurrences, err := strconv.ParseUint(strings.TrimSpace(values[1]), 10, 64)
+	if err != nil {
+		return FECHistogramBin{}, false
+	}
+	return FECHistogramBin{
+		Bin:           bin,
+		ErrorCountMin: minimum,
+		ErrorCountMax: maximum,
+		Occurrences:   occurrences,
+	}, true
+}
+
+// consecutiveFECBins orders the bins and accepts them only as the run 0..n-1:
+// with a bin missing, the disjoint vendor ranges would no longer cover the
+// error counts they describe.
+func consecutiveFECBins(binsByNumber map[int]FECHistogramBin) []FECHistogramBin {
 	if len(binsByNumber) == 0 {
 		return nil
 	}
@@ -378,69 +428,22 @@ func decodeSerDesTX(sec section) SerDesTX {
 		return SerDesTX{}
 	}
 
-	parameters, ok := rawValues(sec["Serdes TX parameters"])
-	if !ok || len(parameters) == 0 {
+	parameters, ok := serDesHeader(sec)
+	if !ok {
 		return SerDesTX{}
 	}
-	seenParameters := make(map[string]struct{}, len(parameters))
-	for i := range parameters {
-		parameters[i] = strings.TrimSpace(parameters[i])
-		if _, duplicate := seenParameters[parameters[i]]; duplicate {
-			return SerDesTX{}
-		}
-		seenParameters[parameters[i]] = struct{}{}
-	}
-
-	lanes := make(map[int][]string)
-	for key, raw := range sec {
-		if key == "Serdes TX parameters" {
-			continue
-		}
-		if !strings.HasPrefix(key, "Lane ") {
-			continue
-		}
-		lane, ok := parseNonnegativeInt(strings.TrimPrefix(key, "Lane "))
-		if !ok {
-			return SerDesTX{}
-		}
-		if _, duplicate := lanes[lane]; duplicate {
-			return SerDesTX{}
-		}
-		values, ok := rawValues(raw)
-		if !ok || len(values) != len(parameters) {
-			return SerDesTX{}
-		}
-		lanes[lane] = values
+	lanes, ok := serDesLanes(sec, len(parameters))
+	if !ok {
+		return SerDesTX{}
 	}
 
 	var decoded SerDesTX
 	for lane, values := range lanes {
-		knownValues := make(map[string]float64)
-		validLane := true
-		for i, parameter := range parameters {
-			if _, known := serDesParameter(parameter); !known {
-				continue
-			}
-			value, err := strconv.ParseFloat(strings.TrimSpace(values[i]), 64)
-			if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
-				validLane = false
-				break
-			}
-			knownValues[parameter] = value
-		}
-		if !validLane {
+		knownValues, ok := serDesKnownValues(parameters, values)
+		if !ok {
 			continue
 		}
-		for parameter, value := range knownValues {
-			tap, _ := serDesParameter(parameter)
-			if parameter == "drv_amp" {
-				decoded.DriveAmplitude = append(decoded.DriveAmplitude, LaneValue{Lane: lane, Value: value})
-				continue
-			}
-			decoded.FIRCoefficients = append(decoded.FIRCoefficients, SerDesFIRCoefficient{
-				Lane: lane, Tap: tap, Value: value,
-			})
-		}
+		appendSerDesLane(&decoded, lane, knownValues)
 	}
 	sort.SliceStable(decoded.FIRCoefficients, func(i, j int) bool {
 		if decoded.FIRCoefficients[i].Lane != decoded.FIRCoefficients[j].Lane {
@@ -452,6 +455,77 @@ func decodeSerDesTX(sec section) SerDesTX {
 		return decoded.DriveAmplitude[i].Lane < decoded.DriveAmplitude[j].Lane
 	})
 	return decoded
+}
+
+// serDesHeader reads the parameter names every lane's values are zipped with.
+// A repeated name would leave it ambiguous which value it labels.
+func serDesHeader(sec section) ([]string, bool) {
+	parameters, ok := rawValues(sec["Serdes TX parameters"])
+	if !ok || len(parameters) == 0 {
+		return nil, false
+	}
+	seenParameters := make(map[string]struct{}, len(parameters))
+	for i := range parameters {
+		parameters[i] = strings.TrimSpace(parameters[i])
+		if _, duplicate := seenParameters[parameters[i]]; duplicate {
+			return nil, false
+		}
+		seenParameters[parameters[i]] = struct{}{}
+	}
+	return parameters, true
+}
+
+func serDesLanes(sec section, parameterCount int) (map[int][]string, bool) {
+	lanes := make(map[int][]string)
+	for key, raw := range sec {
+		if key == "Serdes TX parameters" || !strings.HasPrefix(key, "Lane ") {
+			continue
+		}
+		lane, ok := parseNonnegativeInt(strings.TrimPrefix(key, "Lane "))
+		if !ok {
+			return nil, false
+		}
+		if _, duplicate := lanes[lane]; duplicate {
+			return nil, false
+		}
+		values, ok := rawValues(raw)
+		if !ok || len(values) != parameterCount {
+			return nil, false
+		}
+		lanes[lane] = values
+	}
+	return lanes, true
+}
+
+// serDesKnownValues reads one lane's allowlisted parameters, all of them or
+// none. Unknown parameters are skipped unparsed, so a parameter a newer MFT adds
+// cannot cost a lane its known values.
+func serDesKnownValues(parameters, values []string) (map[string]float64, bool) {
+	knownValues := make(map[string]float64)
+	for i, parameter := range parameters {
+		if _, known := serDesParameter(parameter); !known {
+			continue
+		}
+		value, ok := parseFiniteFloat(values[i])
+		if !ok {
+			return nil, false
+		}
+		knownValues[parameter] = value
+	}
+	return knownValues, true
+}
+
+func appendSerDesLane(decoded *SerDesTX, lane int, knownValues map[string]float64) {
+	for parameter, value := range knownValues {
+		tap, _ := serDesParameter(parameter)
+		if parameter == "drv_amp" {
+			decoded.DriveAmplitude = append(decoded.DriveAmplitude, LaneValue{Lane: lane, Value: value})
+			continue
+		}
+		decoded.FIRCoefficients = append(decoded.FIRCoefficients, SerDesFIRCoefficient{
+			Lane: lane, Tap: tap, Value: value,
+		})
+	}
 }
 
 func parseNonnegativeInt(raw string) (int, bool) {
