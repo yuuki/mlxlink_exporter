@@ -14,9 +14,8 @@ Thanks for helping with mlxlink_exporter.
   hardware. Touching the decoder or discovery? Run `make test-fuzz` too.
 - **Keep the docs in sync.** A change to metrics, flags or failure behaviour
   updates `docs/design.md`, `README.md` and `docs/deployment.md` together.
-- **Commit style:** short scoped subjects such as `mlxlink: …`, `docs: …`,
-  `release: …`, `ci: …`, `deps: …`, with the reason in the body.
+- **Commits, branches and pull request titles** follow the Git conventions
+  in [AGENTS.md](AGENTS.md#git-conventions).
 
-The full command list, conventions and compatibility contracts are in
-[AGENTS.md](AGENTS.md). Security issues go through [SECURITY.md](SECURITY.md),
-not public issues.
+The conventions and compatibility contracts are in [AGENTS.md](AGENTS.md).
+Security issues go through [SECURITY.md](SECURITY.md), not public issues.

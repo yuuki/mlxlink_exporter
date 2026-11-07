@@ -19,6 +19,7 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: ci
+      include: scope
 
   - package-ecosystem: gomod
     directories: ["/"]
@@ -30,4 +31,5 @@ updates:
       go-modules:
         patterns: ["*"]
     commit-message:
-      prefix: deps
+      prefix: build
+      include: scope
