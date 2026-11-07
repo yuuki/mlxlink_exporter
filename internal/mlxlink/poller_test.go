@@ -94,7 +94,6 @@ type fakeRunner struct {
 	calls         []string
 	baselineCalls int
 	callOrder     []string
-	done          chan string
 }
 
 func newFakeRunner(output []byte) *fakeRunner {
@@ -103,7 +102,6 @@ func newFakeRunner(output []byte) *fakeRunner {
 		eyeOutput:      output,
 		pcieEyeOutput:  output,
 		baselineOutput: output,
-		done:           make(chan string, 64),
 	}
 }
 
@@ -120,10 +118,6 @@ func (f *fakeRunner) RunWithEye(_ context.Context, device string) ([]byte, error
 
 	if onCall != nil {
 		onCall(device)
-	}
-	select {
-	case f.done <- device:
-	default:
 	}
 	return output, err
 }
@@ -157,11 +151,6 @@ func (f *fakeRunner) Run(_ context.Context, device string) ([]byte, error) {
 
 	if onCall != nil {
 		onCall(device)
-	}
-
-	select {
-	case f.done <- device:
-	default:
 	}
 	return output, err
 }
@@ -217,21 +206,6 @@ func (f *fakeRunner) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.calls)
-}
-
-// awaitCall waits for the next runner invocation. Anything the poller did
-// before that call is guaranteed to be visible, because the sweep loop is a
-// single goroutine.
-func (f *fakeRunner) awaitCall(t *testing.T) string {
-	t.Helper()
-
-	select {
-	case device := <-f.done:
-		return device
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for a runner call, saw %d", f.callCount())
-		return ""
-	}
 }
 
 // fakeClock hands out a manually driven ticker and reports when the poller
