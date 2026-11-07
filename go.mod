@@ -2,7 +2,10 @@ module github.com/yuuki/mlxlink_exporter
 
 go 1.27.3
 
-require github.com/prometheus/client_golang v1.25.0
+require (
+	github.com/prometheus/client_golang v1.25.0
+	go.uber.org/goleak v1.3.0
+)
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

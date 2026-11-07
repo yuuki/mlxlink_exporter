@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -121,6 +122,33 @@ func TestSysfsDiscovery_MissingDeviceSymlink(t *testing.T) {
 	want := Target{Device: "mlx5_0", Port: "1"}
 	if targets[0] != want {
 		t.Fatalf("expected target %+v, got %+v", want, targets[0])
+	}
+}
+
+// TestSysfsDiscovery_NamesThatCannotBeLabels pins what FuzzSysfsDiscovery
+// found: a device name or PCI address that is not valid UTF-8 cannot be a
+// Prometheus label value, so it must never reach a target. Before, such a name
+// failed every scrape and panicked the poller on its first counted error.
+func TestSysfsDiscovery_NamesThatCannotBeLabels(t *testing.T) {
+	t.Parallel()
+
+	root := newSysfsTree(t, "mlx5_0", "1")
+	classDir := filepath.Join(root, classInfinibandPath)
+	if err := os.MkdirAll(filepath.Join(classDir, "mlx5_\xff", portsDirName, "1"), 0o755); err != nil {
+		t.Skipf("the file system rejects names that are not valid UTF-8: %v", err)
+	}
+	if err := os.Symlink("../../../devices/pci0000:1a/0000:1a:00.\xbf",
+		filepath.Join(classDir, "mlx5_0", deviceLinkName)); err != nil {
+		t.Fatalf("create device symlink: %v", err)
+	}
+
+	targets, err := NewSysfsDiscovery(root, nil, newDiscardLogger()).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	want := []Target{{Device: "mlx5_0", Port: "1"}}
+	if !reflect.DeepEqual(targets, want) {
+		t.Fatalf("expected %q, got %q", want, targets)
 	}
 }
 

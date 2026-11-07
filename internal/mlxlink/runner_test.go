@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // writeFakeMlxlink materialises an executable stand-in for the mlxlink binary.
@@ -301,6 +303,71 @@ func TestExecRunner_ParentContextCanceledIsNotRunError(t *testing.T) {
 	var runErr *RunError
 	if errors.As(err, &runErr) {
 		t.Fatalf("shutdown must not be reported as a run error, got %v", runErr)
+	}
+}
+
+// TestExecRunner_ShutdownDuringSweepKillsMlxlink drives the shutdown main
+// performs: cancelling the poller's context while mlxlink hangs must kill the
+// process, return Run promptly, publish and count nothing, and leave no
+// os/exec goroutine behind (TestMain runs goleak).
+func TestExecRunner_ShutdownDuringSweepKillsMlxlink(t *testing.T) {
+	t.Parallel()
+
+	// The script announces its pid through a FIFO and then hangs as a stuck
+	// firmware access would. Reading the FIFO blocks until it has written, so
+	// the test synchronises on mlxlink running rather than on a sleep.
+	started := filepath.Join(t.TempDir(), "started")
+	if err := syscall.Mkfifo(started, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	path := writeFakeMlxlink(t, "#!/bin/sh\necho $$ > \""+started+"\"\nexec sleep 30\n")
+	runner := NewExecRunner(path, 30*time.Second, newDiscardLogger())
+	poller := NewPoller(newFakeDiscoverer([]Target{targetMlx0}), runner, testPollInterval,
+		newDiscardLogger(), withClock(newFakeClock(1)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		poller.Run(ctx)
+	}()
+
+	announced := make(chan string, 1)
+	go func() {
+		data, err := os.ReadFile(started)
+		if err != nil {
+			t.Errorf("read pid from FIFO: %v", err)
+		}
+		announced <- strings.TrimSpace(string(data))
+	}()
+	var pid int
+	select {
+	case raw := <-announced:
+		var err error
+		if pid, err = strconv.Atoi(raw); err != nil {
+			t.Fatalf("parse announced pid %q: %v", raw, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("mlxlink did not start")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancellation while mlxlink was running")
+	}
+
+	// Run returning means Wait reaped the child, so its pid is gone.
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("mlxlink (pid %d) outlived the shutdown: kill(0) = %v", pid, err)
+	}
+	if got := testutil.CollectAndCount(poller.Errors()); got != 0 {
+		t.Fatalf("shutdown must not count collection errors, got %d series", got)
+	}
+	if poller.Snapshots() != nil || poller.Ready() {
+		t.Fatalf("an interrupted first sweep must publish nothing, got %+v", poller.Snapshots())
 	}
 }
 

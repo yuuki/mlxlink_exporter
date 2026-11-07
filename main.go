@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/yuuki/mlxlink_exporter/internal/mlxlink"
 	"github.com/yuuki/mlxlink_exporter/internal/mlxlinkexporter"
@@ -87,20 +88,20 @@ func main() {
 	mlxlinkCollector := mlxlink.NewCollector(poller, cfg.StaleAfter(), logger)
 
 	registry := prometheus.NewRegistry()
-	collectors := []prometheus.Collector{
-		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
-		prometheus.NewGoCollector(),
+	registered := []prometheus.Collector{
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		collectors.NewGoCollector(),
 		mlxlinkCollector,
 		poller.Errors(),
 		poller.Overlaps(),
 	}
 	if cfg.ShowPCIeEye {
-		collectors = append(collectors,
+		registered = append(registered,
 			mlxlink.NewPCIeEyeCollector(poller, cfg.StaleAfter(), logger),
 			poller.PCIeEyeErrors(),
 		)
 	}
-	registry.MustRegister(collectors...)
+	registry.MustRegister(registered...)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

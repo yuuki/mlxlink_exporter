@@ -106,7 +106,9 @@ func (r *ExecRunner) run(ctx context.Context, device string, queryArgs ...string
 	args = append(args, "-d", device)
 	args = append(args, queryArgs...)
 	args = append(args, "--json")
-	cmd := exec.CommandContext(runCtx, r.path, args...)
+	// The path is the operator's --mlxlink-path and the arguments are one of the
+	// fixed vectors above around a sysfs device name; exec never involves a shell.
+	cmd := exec.CommandContext(runCtx, r.path, args...) //nolint:gosec // G204: running mlxlink is this exporter's purpose
 	// mlxlink formats values per locale; pin to C so parsing stays stable.
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	cmd.Stdout = stdout

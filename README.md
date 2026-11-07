@@ -183,8 +183,13 @@ The `instance` regex above assumes a `host:port` target. Targets written as brac
 
 ## Testing
 ```bash
-go test ./...
+go test ./...      # unit tests
+make test-race     # what CI runs
+make check         # the pre-PR gate: golangci-lint, workflow audit, race tests, build
+make test-fuzz     # every fuzz target for FUZZTIME (default 30s)
 ```
+
+None of these needs root, RDMA hardware or MFT. The [Makefile](Makefile) lists every target and [CONTRIBUTING.md](CONTRIBUTING.md) how to propose a change.
 
 For deterministic builds in shared environments, you can pin Go's caches locally:
 

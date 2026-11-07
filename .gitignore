@@ -2,4 +2,5 @@
 /dist/
 .gocache/
 .gomodcache/
-
+# make bench
+/bench.txt

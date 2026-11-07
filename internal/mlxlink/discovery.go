@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const (
@@ -97,6 +98,13 @@ func (d *SysfsDiscovery) targetFor(classDir string, entry fs.DirEntry) (Target, 
 	if d.exclude[name] || !isDeviceDir(classDir, entry) {
 		return Target{}, false
 	}
+	// The name becomes a label value, which Prometheus requires to be valid
+	// UTF-8: one that is not would fail every scrape and panic the poller on
+	// the first error it counts for the device.
+	if !utf8.ValidString(name) {
+		d.logger.Warn("skipping device whose name is not valid UTF-8", "device", name)
+		return Target{}, false
+	}
 
 	devicePath := filepath.Join(classDir, name, deviceLinkName)
 	pciAddr, isVF := readPCIInfo(devicePath)
@@ -154,9 +162,10 @@ func isDeviceDir(classDir string, entry fs.DirEntry) bool {
 
 // readPCIInfo resolves the PCI address from the device symlink target and
 // detects SR-IOV virtual functions, which carry a physfn link back to their
-// physical function. An unresolvable symlink yields an empty address.
+// physical function. An unresolvable symlink yields an empty address, and so
+// does a target that is not valid UTF-8, which no label value may carry.
 func readPCIInfo(devicePath string) (pciAddr string, isVF bool) {
-	if link, err := os.Readlink(devicePath); err == nil {
+	if link, err := os.Readlink(devicePath); err == nil && utf8.ValidString(filepath.Base(link)) {
 		pciAddr = filepath.Base(link)
 	}
 	if _, err := os.Lstat(filepath.Join(devicePath, physfnLinkName)); err == nil {
