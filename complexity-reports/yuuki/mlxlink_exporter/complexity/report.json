@@ -1,9 +1,9 @@
 {
   "repository": "yuuki/mlxlink_exporter/complexity",
   "ref": "refs/heads/main",
-  "commit": "47ef0fae46b7d8e66c50ebb644cab518c8f97696",
+  "commit": "14671de286f92baff88e6ee05cf20cce9c62827a",
   "base_ref": "refs/heads/main",
-  "timestamp": "2026-11-05T13:51:17.866874849Z",
+  "timestamp": "2026-11-07T11:33:33.324079323Z",
   "custom_metrics": [
     {
       "key": "code_complexity",
@@ -17,7 +17,7 @@
         {
           "key": "cognitive_sum",
           "name": "Cognitive: total",
-          "value": 327
+          "value": 329
         },
         {
           "key": "cognitive_max",
@@ -37,7 +37,7 @@
         {
           "key": "cyclomatic_sum",
           "name": "Cyclomatic: total",
-          "value": 418
+          "value": 420
         },
         {
           "key": "cyclomatic_max",
@@ -52,7 +52,7 @@
         {
           "key": "cyclomatic_p90",
           "name": "Cyclomatic: p90",
-          "value": 6
+          "value": 7
         }
       ]
     }
