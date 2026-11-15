@@ -1,8 +1,11 @@
 # Prometheus mlxlink Exporter
 
+[![AI Generated](https://img.shields.io/badge/AI%20Generated-Claude-orange?logo=anthropic)](https://claude.ai/claude-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/yuuki/mlxlink_exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/yuuki/mlxlink_exporter/actions/workflows/ci.yml)
+[![Security](https://github.com/yuuki/mlxlink_exporter/actions/workflows/security.yml/badge.svg)](https://github.com/yuuki/mlxlink_exporter/actions/workflows/security.yml)
 [![GitHub release](https://img.shields.io/github/v/release/yuuki/mlxlink_exporter)](https://github.com/yuuki/mlxlink_exporter/releases)
+[![Go version](https://img.shields.io/github/go-mod/go-version/yuuki/mlxlink_exporter)](go.mod)
 
 `mlxlink_exporter` which publishes physical link and optical module telemetry that NVIDIA's `mlxlink` reports: bit error ratios, per-lane raw errors, FEC error histograms, SerDes transmitter tuning, optional network and root-PCIe Eye measurements, transceiver diagnostics (temperature, voltage, bias current, optical power) and module inventory.
 
